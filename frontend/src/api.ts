@@ -129,3 +129,24 @@ export async function fetchAuthoritativeRules() {
   if (!res.ok) throw new Error('Failed to fetch authoritative rules');
   return res.json();
 }
+
+export async function retryInspection(recordId: string, orgId: string) {
+  const res = await fetch(`${API_BASE}/records/${recordId}/retry`, {
+    method: 'POST',
+    headers: { 'X-Org-ID': orgId }
+  });
+  if (!res.ok) throw new Error('Failed to retry inspection');
+  return res.json();
+}
+
+export async function uploadPhoto(file: File, orgId: string) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/upload-photo`, {
+    method: 'POST',
+    headers: { 'X-Org-ID': orgId },
+    body: formData
+  });
+  if (!res.ok) throw new Error('Photo upload failed');
+  return res.json();
+}

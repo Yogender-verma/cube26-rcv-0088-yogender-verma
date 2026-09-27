@@ -1,15 +1,16 @@
 import React, { useState } from 'react';
 import { ReceivingRecord } from '../api';
-import { Search, Eye, Edit3, ShieldAlert, CheckCircle, AlertTriangle, FileText } from 'lucide-react';
+import { Search, Eye, Edit3, ShieldAlert, CheckCircle, AlertTriangle, FileText, RefreshCw } from 'lucide-react';
 
 interface Props {
   records: ReceivingRecord[];
   onSelectRecord: (rec: ReceivingRecord) => void;
   onOpenOverride: (rec: ReceivingRecord) => void;
   onViewContract: (rec: ReceivingRecord) => void;
+  onRetryRecord?: (rec: ReceivingRecord) => void;
 }
 
-export const HistoryTable: React.FC<Props> = ({ records, onSelectRecord, onOpenOverride, onViewContract }) => {
+export const HistoryTable: React.FC<Props> = ({ records, onSelectRecord, onOpenOverride, onViewContract, onRetryRecord }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [verdictFilter, setVerdictFilter] = useState('ALL');
 
@@ -125,6 +126,11 @@ export const HistoryTable: React.FC<Props> = ({ records, onSelectRecord, onOpenO
                 </td>
                 <td style={{ padding: '10px', textAlign: 'right' }}>
                   <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                    {(r.overall_verdict === 'PENDING_REVIEW' || r.status === 'pending_review') && onRetryRecord && (
+                      <button className="btn btn-primary" style={{ padding: '4px 8px', fontSize: '0.75rem', background: '#8b5cf6' }} onClick={() => onRetryRecord(r)} title="Retry Inspection">
+                        <RefreshCw size={14} /> Retry
+                      </button>
+                    )}
                     <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => onSelectRecord(r)} title="Evidence Deep-Dive">
                       <Eye size={14} /> Evidence
                     </button>

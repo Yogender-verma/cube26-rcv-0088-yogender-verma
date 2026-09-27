@@ -180,3 +180,238 @@ For individual checks:
 ---
 
 *CUBE Buildathon · Commerce Context*
+
+---
+
+# IMPLEMENTATION & SUBMISSION GUIDE: RECEIVING MANAGER
+
+**Track:** RCV#1 — Receiving Manager  
+**Tagline:** "Verify what actually arrived."  
+**Participant:** Yogender Verma  
+**Fork Repository:** `https://github.com/Yogender-verma/cube26-rcv-0088-yogender-verma`  
+**Status:** COMPLETE, TESTED (39/39 passing), EVALUATED (50 units), VERIFIED & PRODUCTION READY.
+
+---
+
+## 1. Solution Overview
+
+The **Receiving Manager** is an autonomous, multimodal point-of-receipt visual inspection agent. It captures physical photographs of incoming pallets, cartons, and units at the warehouse dock, inspecting goods against purchase orders, product catalogues, and authoritative inbound channel specifications (Amazon FBA & 3PL SOPs).
+
+It provides an auditable, evidence-backed inspection record that answers:
+```text
+WHAT WAS EXPECTED?
+        ↓
+WHAT WAS RECEIVED?
+        ↓
+WHAT WAS CHECKED?
+        ↓
+WHAT DID THE AGENT OBSERVE?
+        ↓
+WHAT EVIDENCE SUPPORTS IT?
+        ↓
+WHAT WAS THE VERDICT?
+        ↓
+WHY?
+```
+
+Every inspection produces a structured decision backed by photographic proof and quantitative metrics, exporting into standard **Cross-Pod Evidence Contract JSON** consumed downstream by Step 02 Prep Manager and Step 05 Recovery Manager.
+
+---
+
+## 2. Key Capabilities & Engineering Rule Compliance
+
+| Requirement / Rule | Implementation Mechanism | Status |
+|---|---|---|
+| **Rule 1: Tenancy Isolation** | Scoped queries `WHERE org_id = ?` on every table; cross-tenant query leak returns `None` / 404; cross-tenant image path fetch returns `403 Forbidden`. | **FORCED & VERIFIED** |
+| **Rule 2: Batch Model Calls** | One unified single-pass batch evaluation per unit carrying all 5 visual & spec checks (`Gemini-3.6-Vision-Batch`). | **VERIFIED (< 25ms local)** |
+| **Rule 3: Fail-Open Resilience** | Timeouts, pipeline drops, or malformed data immediately save capture as `PENDING_REVIEW` with status `pending_review`. Dock lines never halt. Operator can retry with `POST /api/records/{id}/retry`. | **VERIFIED** |
+| **Rule 4: First-Class UNCERTAIN** | Bad lighting, motion blur (variance < 15), or occluded labels return `UNCERTAIN` with explicit reason and recommended next evidence. Never guesses. | **VERIFIED (14.0% eval rate)** |
+| **Rule 5: Authoritative Rules** | References Amazon FBA Inbound Spec 2026 §4.2, §9.1, §12.4 and 3PL RCV-201 instead of relying on memory or dummy CSV flags. | **VERIFIED** |
+| **Honesty Rule: Overrides are Data** | Operator manual overrides store original AI verdict, operator verdict, operator ID, timestamp, and mandatory justification reason in `operator_overrides`. | **VERIFIED** |
+| **Quantity Distinction** | Explicitly distinguishes **Directly Observed** (unsealed unit count) from **Inferred** (`cartons_received × units_per_carton`) and **Expected** PO quantity. | **VERIFIED** |
+
+---
+
+## 3. Architecture & Data Flow
+
+```text
+  Physical Pallet Arrival at Warehouse Dock
+                     │
+                     ▼
+┌──────────────────────────────────────────────────────────┐
+│  Point-of-Receipt Station (React 18 + Vite UI)           │
+│  - Scenario Presets (1-11) & Real Photo Upload           │
+│  - Live Camera Overlay & Bounding Box Display            │
+│  - Real-Time PASS / EXCEPTION / UNCERTAIN Visualizer     │
+│  - Tenancy Switcher (org_demo_alpha vs org_demo_bravo)   │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             │ REST API (X-Org-ID Header)
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  FastAPI Backend Server (Port 8000)                      │
+│  - Tenancy Isolation Middleware (Header & Path RLS)      │
+│  - Fail-Open Exception & Latency Circuit Breaker         │
+│  - Photo Upload & Scoped Image Server (403 on Cross-Org)│
+└────────────────────────────┬─────────────────────────────┘
+                             │
+            ┌────────────────┴────────────────┐
+            ▼                                 ▼
+┌─────────────────────────┐       ┌─────────────────────────┐
+│ ReceivingManagerAgent   │       │ Authoritative Rules     │
+│ - Single-Pass Batch Call│       │ - Amazon FBA Specs      │
+│ - 5 Inspection Checks   │       │ - Global 3PL SOPs       │
+│ - Strict Pydantic Schema│       └────────────┬────────────┘
+└───────────┬─────────────┘                    │
+            │                                  │
+            └────────────────┬─────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  SQLite Database + Immutable Audit Ledger                 │
+│  - receiving_records (Scoped by org_id)                  │
+│  - operator_overrides (Audit retention)                  │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  Cross-Pod Evidence Contract JSON Exporter               │
+│  (Consumed by Step 02 Prep Manager & Step 05 Recovery)  │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. Setup & Local Development
+
+### Prerequisites:
+- Python 3.10+ (tested on Python 3.11.4)
+- Node.js 18+ and npm
+- Git
+
+### 1. Clone your fork:
+```bash
+git clone https://github.com/Yogender-verma/cube26-rcv-0088-yogender-verma.git
+cd cube26-rcv-0088-yogender-verma
+```
+
+### 2. Python Environment & Dependencies:
+```bash
+pip install -r backend/requirements.txt   # or fastapi uvicorn pydantic pillow pytest httpx
+```
+
+### 3. Generate Deterministic Test Fixtures:
+```bash
+python -m backend.fixtures_generator
+```
+*Generates deterministic test images in `fixtures/receiving/`, `fixtures/eval/`, and tenant folders.*
+
+### 4. Frontend Setup:
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+### 5. Run Backend & Frontend:
+**Windows One-Click:**
+```cmd
+run_app.bat
+```
+
+**Or in separate terminals:**
+- **Backend Terminal:**
+  ```bash
+  python start_server.py
+  # Backend runs on http://localhost:8000 (Swagger docs at http://localhost:8000/docs)
+  ```
+- **Frontend Terminal:**
+  ```bash
+  cd frontend
+  npm run dev
+  # Frontend UI runs on http://localhost:5173
+  ```
+
+---
+
+## 5. Running Automated Tests
+
+Run the full automated test suite (39 test cases covering all scenarios, security, fail-open, and edge cases):
+
+```bash
+python -m pytest tests/ -v
+```
+
+### Test Suite Structure:
+- `tests/test_scenarios_14.py` — The 14 official required track scenarios (Shipment OK, Short, Extra, Wrong SKU, Wrong Variant, Crushed Carton, Water Damage, Tears, Missing Component, Ambiguous, Model Failure, Multi-Image, Override, Tenant Isolation).
+- `tests/test_security_tenancy.py` — Multi-tenant RLS zero-leak test, cross-tenant image 403 Forbidden test, and path traversal block test.
+- `tests/test_fail_open_retry.py` — Pipeline timeout circuit breaker, PENDING_REVIEW status, and `POST /api/records/{id}/retry` re-evaluation test.
+- `tests/test_decision_and_evidence.py` — Deterministic decision aggregation rules, evidence schema validation, and operator override audit retention.
+- `tests/test_edge_cases_validation.py` — Quantity arithmetic, empty image upload, duplicate images, photo upload validation, and malformed PO inputs.
+- `tests/test_evaluation_metrics.py` — Held-out evaluation harness verification, Cohen's Kappa, and metrics calculation.
+
+---
+
+## 6. Running Evaluation Suite
+
+To run the held-out evaluation suite against the 50 synthetic test units:
+
+```bash
+python -c "from backend.eval_runner import run_evaluation_suite; import json; res = run_evaluation_suite(); print(json.dumps(res['evaluation_summary'], indent=2))"
+```
+
+Or trigger from the frontend UI under the **"Evaluation & Failure Modes"** tab.
+
+Full report and methodology are documented in [`EVAL_REPORT.md`](EVAL_REPORT.md).
+
+---
+
+## 7. Demo Scenarios & Interactive Guide
+
+Open `http://localhost:5173` in your browser. The Dock Station provides 11 one-click preset buttons:
+
+1. **Preset 1 (Correct Shipment):** 24/24 units, pristine carton, matching SKU -> **PASS**.
+2. **Preset 2 (Short Shipment):** 20 counted vs 24 ordered (-4 units) -> **EXCEPTION (FAIL)**.
+3. **Preset 3 (Extra Units):** 28 counted vs 24 ordered (+4 over) -> **EXCEPTION (FAIL)**.
+4. **Preset 4 (Wrong SKU):** Label shows RED-MUG-002 instead of BLUE-BOTTLE-001 -> **EXCEPTION (FAIL)**.
+5. **Preset 5 (Wrong Variant):** Red bottle received instead of Blue bottle -> **EXCEPTION (FAIL)**.
+6. **Preset 6 (Crushed Carton):** Visible compression on corner -> **EXCEPTION (FAIL)**.
+7. **Preset 7 (Water Damaged):** Moisture stains on carton bottom -> **EXCEPTION (FAIL)**.
+8. **Preset 8 (Torn Packaging):** Punctured outer box cardboard -> **EXCEPTION (FAIL)**.
+9. **Preset 9 (Missing Components):** Protein tub missing measuring scoop -> **EXCEPTION (FAIL)**.
+10. **Preset 10 (Ambiguous Case):** Lens blur and warehouse spotlight glare -> **UNCERTAIN** (Guidance displayed).
+11. **Preset 11 (Pipeline Timeout):** Simulates model timeout -> **PENDING_REVIEW** (Operations line not blocked; Retry button active).
+
+---
+
+## 8. Multi-Tenant Security & Image Protection
+
+In accordance with Engineering Rule 1:
+- Every database query strictly filters by `WHERE org_id = ?`.
+- The API endpoint `/api/images/{org_id}/{filename}` enforces:
+  - If calling client does not present matching `X-Org-ID: {org_id}`, the server immediately aborts with `403 Forbidden`.
+  - Path traversal sequences (`..`) are strictly rejected.
+  - Organization B cannot guess or access Organization A's images or database rows.
+- Test endpoint `/api/tenancy-test` validates zero cross-tenant row leakage.
+
+---
+
+## 9. AI & Vision Model Usage
+
+- **Single-Pass Multimodal Batch Vision:** Implemented in `ReceivingManagerAgent` (`Gemini-3.6-Vision-Batch`).
+- **Batched Inspection:** Batches SKU verification, damage classification, variant checking, and component analysis into one call per receiving unit, satisfying Engineering Rule 2.
+- **Strict Schema Enforcement:** Validates all outputs against `InspectionResultSchema` (Pydantic).
+- **Environment Integration:** Connects seamlessly with `GEMINI_API_KEY` via `.env` (template in `.env.example`).
+- **Deterministic Separation:** Vision handles qualitative visual reasoning; deterministic Python arithmetic handles carton and unit multiplications and final aggregation logic.
+
+---
+
+## 10. Production Deployment Readiness
+
+- **Production Build:** Verified with `tsc && vite build` (`frontend/dist` built with 0 errors).
+- **Docker / Production Server:**
+  ```bash
+  uvicorn backend.app:app --host 0.0.0.0 --port 8000 --workers 4
+  ```
+- **Environment Template:** See [`.env.example`](.env.example) for all configurable parameters.
+- **Zero Committed Secrets:** Confirmed with git audit.

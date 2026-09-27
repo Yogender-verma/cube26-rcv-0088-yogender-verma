@@ -65,7 +65,7 @@ def evaluate_authoritative_compliance(receiving_data: Dict[str, Any]) -> List[Di
                 c_dmg = receiving_data.get("carton_damage", "none")
                 if c_dmg in ["crushing", "water", "tears"]:
                     passed = False
-                    reason = f"Carton damage '{c_dmg}' violates {rule['doc_title']} ({rule['rule_id']})"
+                    reason = f"Carton damage '{c_dmg}' violates {category['doc_title']} ({rule['rule_id']})"
                 elif c_dmg == "uncertain":
                     passed = False
                     reason = f"Uncertain carton condition requires mandatory prep inspection under {rule['rule_id']}"

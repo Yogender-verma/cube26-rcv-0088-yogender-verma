@@ -7,7 +7,7 @@ import { EvalDashboard } from './components/EvalDashboard';
 import { TenancySandbox } from './components/TenancySandbox';
 import { ContractViewer } from './components/ContractViewer';
 import { DeliverablesHub } from './components/DeliverablesHub';
-import { fetchRecords, ReceivingRecord } from './api';
+import { fetchRecords, retryInspection, ReceivingRecord } from './api';
 import { Box, Camera, History, BarChart3, Lock, FileText, BookOpen, Layers, Cpu, ShieldCheck } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -111,6 +111,15 @@ export const App: React.FC = () => {
             onSelectRecord={r => setSelectedRecord(r)}
             onOpenOverride={r => setOverrideRecord(r)}
             onViewContract={r => { setSelectedRecord(r); setActiveTab('contract'); }}
+            onRetryRecord={async r => {
+              try {
+                await retryInspection(r.record_id, orgId);
+                await loadData();
+                alert(`Inspection retry complete for record ${r.record_id}!`);
+              } catch (err: any) {
+                alert(`Retry failed: ${err.message}`);
+              }
+            }}
           />
         )}
         {activeTab === 'eval' && <EvalDashboard />}
