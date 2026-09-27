@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReceivingManagerEvidenceRecord",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "record_id",
+    "unit_id",
+    "org_id",
+    "captured_at",
+    "stage",
+    "po_line_reference",
+    "inspection_findings",
+    "verdict",
+    "proof_of_receipt"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "enum": ["1.0.0"] },
+    "record_id": { "type": "string" },
+    "unit_id": { "type": "string" },
+    "org_id": { "type": "string" },
+    "stage": { "type": "string", "enum": ["01_RECEIVING"] },
+    "captured_at": { "type": "string" },
+    "operator_id": { "type": "string" },
+    "po_line_reference": {
+      "type": "object",
+      "required": ["po_number", "po_line", "sku", "asin", "qty_ordered"],
+      "properties": {
+        "po_number": { "type": "string" },
+        "po_line": { "type": "integer" },
+        "supplier": { "type": "string" },
+        "sku": { "type": "string" },
+        "asin": { "type": "string" },
+        "product_title": { "type": "string" },
+        "spec": {
+          "type": "object",
+          "properties": {
+            "colour": { "type": "string" },
+            "variant": { "type": "string" },
+            "components": { "type": "string" }
+          }
+        },
+        "qty_ordered": { "type": "integer" }
+      }
+    },
+    "inspection_findings": {
+      "type": "object",
+      "required": [
+        "identity_match",
+        "quantity_received",
+        "carton_damage",
+        "unit_damage",
+        "quality_flags"
+      ],
+      "properties": {
+        "identity_match": { "type": "string", "enum": ["yes", "no", "uncertain"] },
+        "quantity_received": {
+          "type": "object",
+          "required": ["cartons_received", "units_per_carton", "total_units"],
+          "properties": {
+            "cartons_received": { "type": "integer" },
+            "units_per_carton": { "type": "integer" },
+            "total_units": { "type": "integer" },
+            "discrepancy_delta": { "type": "integer" }
+          }
+        },
+        "carton_damage": { "type": "string", "enum": ["none", "crushing", "water", "tears", "uncertain"] },
+        "unit_damage": { "type": "string", "enum": ["none", "crushing", "water", "tears", "uncertain"] },
+        "quality_flags": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "required": ["overall_verdict", "checks_summary", "confidence_score"],
+      "properties": {
+        "overall_verdict": { "type": "string", "enum": ["PASS", "FAIL", "UNCERTAIN", "PENDING_REVIEW"] },
+        "confidence_score": { "type": "number" },
+        "checks_summary": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "check_name": { "type": "string" },
+              "verdict": { "type": "string", "enum": ["PASS", "FAIL", "UNCERTAIN"] },
+              "confidence": { "type": "number" },
+              "details": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "proof_of_receipt": {
+      "type": "object",
+      "required": ["photo_refs"],
+      "properties": {
+        "photo_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "audit_overrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "overridden_at": { "type": "string" },
+          "operator_id": { "type": "string" },
+          "reason": { "type": "string" },
+          "original_verdict": { "type": "string" },
+          "new_verdict": { "type": "string" }
+        }
+      }
+    }
+  }
+}
