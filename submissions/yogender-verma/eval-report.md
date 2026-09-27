@@ -3,17 +3,26 @@
 **Participant:** Yogender Verma  
 **Repository Fork:** `cube26-rcv-0088-yogender-verma`  
 **Track:** 01 · Receiving Manager (Step 1 of 5 in Commerce Stream)  
+**Evaluation Target:** Single-Pass Batch Vision Receiving Inspection Agent (`ReceivingManagerAgent`)  
+**Methodology:** Deterministic Rule & Heuristic Validation on Synthetic Fixture Suite  
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary & Honest Methodology Statement
 
-Evaluation was conducted against an unseen, held-out evaluation set of **50 synthetic units** independently annotated by two human labellers (Labeller A and Labeller B) across five core receiving dimensions: SKU Identity, Quantity Verification, Carton Damage, Unit Damage, and Spec Quality.
+Evaluation was conducted against a test suite of **50 synthetic units** (`EVAL-UNIT-0001` through `EVAL-UNIT-0050`) generated deterministically to validate rule enforcement, schema safety, fail-open circuit breaking, and uncertainty propagation across five core receiving dimensions: SKU Identity, Quantity Verification, Carton Damage, Unit Damage, and Spec Quality.
+
+### Methodology Disclosures:
+- **Synthetic Data:** All 50 units and images are programmatic synthetic fixtures generated with Pillow (`fixtures_generator.py`). They are not human-captured real warehouse dock photographs.
+- **Annotators:** "Labeller A" and "Labeller B" are programmatic consensus fixtures used to validate the implementation of the Cohen's Kappa scoring formula, not independent human auditors.
+- **Metric Scope:** The 100% accuracy result represents **Synthetic Fixture Decision Accuracy** (exact agreement between deterministic rules and synthetic fixtures). It demonstrates rule adherence and schema compliance, but does not claim empirical open-world generalization.
+- **AI Separation:** Runs in **Demo Mode (Synthetic Heuristic Engine)** by default when `GEMINI_API_KEY` is not set; invokes **Real AI Mode (Google Gemini Multimodal API)** when `GEMINI_API_KEY` is configured. If live AI fails, it triggers the fail-open circuit breaker and never silently fabricates mock results.
 
 ### Key Metrics:
 - **Total Units Evaluated:** 50
-- **Inter-Annotator Agreement (Cohen's Kappa):** **1.00**
-- **Overall Accuracy (excl. UNCERTAIN):** **100.0%**
+- **Evaluation Type:** Synthetic Fixture Rule Validation
+- **Cohen's Kappa (Formula Verification):** **1.00**
+- **Synthetic Fixture Decision Accuracy (excl. UNCERTAIN):** **100.0%** (43 of 43 judged units match rule specs)
 - **Precision:** **1.000**
 - **Recall:** **1.000**
 - **F1-Score:** **1.000**
@@ -24,7 +33,7 @@ Evaluation was conducted against an unseen, held-out evaluation set of **50 synt
 
 ---
 
-## 2. Held-Out Composition Table
+## 2. Dataset Composition Table
 
 | Scenario Category | Unit ID Range | Count | Ground Truth | Visual Evidence State |
 |---|---|---|---|---|
@@ -45,15 +54,15 @@ Evaluation was conducted against an unseen, held-out evaluation set of **50 synt
 
 ---
 
-## 4. Per-Check Sub-Dimension Metrics
+## 4. Per-Check Sub-Dimension Metrics (Dynamically Computed)
 
-| Check Name | Benchmark Accuracy | False Positives | False Negatives | UNCERTAIN Rate |
-|---|---|---|---|---|
-| **Product / SKU Identity** | 96.0% | 1 | 1 | 4.0% (2 units) |
-| **Quantity Verification** | 98.0% | 0 | 1 | 0.0% (0 units) |
-| **Carton Physical Damage** | 92.0% | 2 | 2 | 6.0% (3 units) |
-| **Unit Physical Damage** | 90.0% | 2 | 3 | 4.0% (2 units) |
-| **Spec Quality Flags** | 94.0% | 1 | 2 | 0.0% (0 units) |
+| Check Name | Evaluated Units | Accuracy on Evaluated | False Positives | False Negatives | UNCERTAIN Count |
+|---|---|---|---|---|---|
+| **Product / SKU Identity** | 43 | 100.0% | 0 | 0 | 7 |
+| **Quantity Verification** | 50 | 100.0% | 0 | 0 | 0 |
+| **Carton Physical Damage** | 43 | 100.0% | 0 | 0 | 7 |
+| **Unit Physical Damage** | 43 | 100.0% | 0 | 0 | 7 |
+| **Spec Quality Flags** | 50 | 100.0% | 0 | 0 | 0 |
 
 ---
 

@@ -52,7 +52,26 @@ export interface InspectionPayload {
   override_quality_flags?: string[];
 }
 
+export interface HealthStatus {
+  status: string;
+  service: string;
+  tenancy_isolation: string;
+  execution_mode: string;
+  is_real_ai: boolean;
+  batch_model: string;
+  ai_provider: string;
+  fail_open_support: boolean;
+  track: string;
+  tagline: string;
+}
+
 const API_BASE = 'http://localhost:8000/api';
+
+export async function fetchHealth(): Promise<HealthStatus> {
+  const res = await fetch(`${API_BASE}/health`);
+  if (!res.ok) throw new Error('Health check failed');
+  return res.json();
+}
 
 export async function fetchRecords(orgId: string): Promise<ReceivingRecord[]> {
   const res = await fetch(`${API_BASE}/records`, {

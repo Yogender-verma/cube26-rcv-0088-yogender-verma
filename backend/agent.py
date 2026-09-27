@@ -72,6 +72,9 @@ class InspectionResultSchema(BaseModel):
     decision_rationale: str
     uncertain_explanation: Optional[str] = None
     recommended_next_evidence: Optional[str] = None
+    execution_mode: str = "DEMO_MODE_SYNTHETIC"
+    is_real_ai: bool = False
+    ai_provider: str = "Deterministic Rule & Heuristic Engine (Demo Mode)"
     what_received: Dict[str, Any]
     what_expected: Dict[str, Any]
     checks: List[Dict[str, Any]]
@@ -90,8 +93,19 @@ def safe_int(val: Any, default: int = 1) -> int:
 
 
 class ReceivingManagerAgent:
-    def __init__(self, model_name: str = "Gemini-3.6-Vision-Batch", model_version: str = "v1.2-rcv"):
-        self.model_name = model_name
+    def __init__(self, model_name: Optional[str] = None, model_version: str = "v1.2-rcv"):
+        self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        self.is_real_ai = bool(self.api_key and self.api_key != "YOUR_GEMINI_API_KEY_HERE")
+        
+        if self.is_real_ai:
+            self.model_name = model_name or os.environ.get("VISION_MODEL_NAME", "gemini-1.5-flash")
+            self.execution_mode = "REAL_AI_MULTIMODAL"
+            self.ai_provider = "Google Gemini Multimodal Vision API"
+        else:
+            self.model_name = model_name or "Deterministic-Rule-Mock-Agent (Demo Mode)"
+            self.execution_mode = "DEMO_MODE_SYNTHETIC"
+            self.ai_provider = "Deterministic Rule & Heuristic Engine (Demo Mode)"
+
         self.model_version = model_version
         self.base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -105,8 +119,7 @@ class ReceivingManagerAgent:
     ) -> Dict[str, Any]:
         """
         Executes single-pass batch receiving inspection.
-        Batches all visual reasoning checks (SKU identity, carton damage, unit damage,
-        spec quality, missing components) into a single unified pass.
+        Batches all visual reasoning checks into a single unified pass.
         Computes deterministic arithmetic for carton and unit counts.
         """
         start_time = time.time()
@@ -122,6 +135,29 @@ class ReceivingManagerAgent:
                 captured_at=captured_at,
                 reason="Vision pipeline timeout / model service unavailability (Fail-Open active)"
             )
+
+        # Real Gemini Multimodal AI Branch if API key is configured
+        if self.is_real_ai:
+            try:
+                return self._run_real_gemini_vision(
+                    org_id=org_id,
+                    unit_id=unit_id,
+                    po_line_spec=po_line_spec,
+                    captured_images=captured_images,
+                    captured_at=captured_at,
+                    start_time=start_time
+                )
+            except Exception as gemini_err:
+                # Engineering Rule 3: If real AI fails, trigger fail-open PENDING_REVIEW
+                # NEVER silently fabricate a mock result and pretend it came from real AI
+                return self._build_fail_open_response(
+                    org_id=org_id,
+                    unit_id=unit_id,
+                    po_line_spec=po_line_spec,
+                    captured_images=captured_images,
+                    captured_at=captured_at,
+                    reason=f"Real Gemini Vision API error: {str(gemini_err)} (Fail-open fallback active)"
+                )
 
         try:
             # 1. Image Quality & Visual Analysis using Pillow / Vision Heuristics
@@ -246,6 +282,9 @@ class ReceivingManagerAgent:
                 decision_rationale=decision_rationale,
                 uncertain_explanation=uncertain_explanation,
                 recommended_next_evidence=recommended_next_evidence,
+                execution_mode=self.execution_mode,
+                is_real_ai=self.is_real_ai,
+                ai_provider=self.ai_provider,
                 what_received=what_received_data,
                 what_expected=what_expected_data,
                 checks=legacy_checks,
@@ -265,6 +304,9 @@ class ReceivingManagerAgent:
                 "batch_single_pass": True,
                 "model_name": self.model_name,
                 "model_version": self.model_version,
+                "execution_mode": self.execution_mode,
+                "is_real_ai": self.is_real_ai,
+                "ai_provider": self.ai_provider,
                 "identity_match": "yes" if sku_check.verdict == "PASS" else ("no" if sku_check.verdict == "FAIL" else "uncertain"),
                 "cartons_ordered": qty_breakdown.expected_carton_count,
                 "cartons_received": qty_breakdown.observed_carton_count,
@@ -624,6 +666,263 @@ class ReceivingManagerAgent:
         return item, []
 
     # --------------------------------------------------------------------------
+    # Real Multimodal Vision (Google Gemini API) - Used ONLY when GEMINI_API_KEY is configured
+    # --------------------------------------------------------------------------
+
+    def _run_real_gemini_vision(
+        self,
+        org_id: str,
+        unit_id: str,
+        po_line_spec: Dict[str, Any],
+        captured_images: List[str],
+        captured_at: str,
+        start_time: float
+    ) -> Dict[str, Any]:
+        """
+        Executes single-pass multimodal visual verification against Google Gemini Vision API.
+        Used ONLY when GEMINI_API_KEY is configured.
+        """
+        import google.generativeai as genai
+
+        genai.configure(api_key=self.api_key)
+        model = genai.GenerativeModel(self.model_name)
+
+        po_sku = po_line_spec.get("sku", "UNKNOWN")
+        po_title = po_line_spec.get("product_title", "Sample Product")
+        spec_col = po_line_spec.get("spec_colour", "n/a")
+        spec_var = po_line_spec.get("spec_variant", "n/a")
+        spec_comp = po_line_spec.get("spec_components", "n/a")
+        cartons_ord = safe_int(po_line_spec.get("cartons_ordered"), 1)
+        units_per_c_ord = safe_int(po_line_spec.get("units_per_carton_ordered"), 12)
+        qty_ord = safe_int(po_line_spec.get("qty_ordered"), cartons_ord * units_per_c_ord)
+
+        pil_images = []
+        if PIL_AVAILABLE:
+            for img_ref in captured_images:
+                full_path = os.path.join(self.base_dir, img_ref) if not os.path.isabs(img_ref) else img_ref
+                if os.path.exists(full_path):
+                    try:
+                        pil_images.append(Image.open(full_path))
+                    except Exception:
+                        pass
+
+        prompt = f"""You are the Receiving Manager AI Agent inspecting an inbound freight receipt.
+Evaluate the attached image(s) against this Purchase Order line specification:
+- PO Number: {po_line_spec.get("po_number", "PO-UNKNOWN")}
+- PO Line: {po_line_spec.get("po_line", 1)}
+- Expected SKU: {po_sku}
+- Expected Product Title: {po_title}
+- Expected Specification: Colour={spec_col}, Variant={spec_var}, Components={spec_comp}
+- Cartons Ordered: {cartons_ord}
+- Units Per Carton Ordered: {units_per_c_ord}
+- Expected Total Quantity: {qty_ord} units
+
+Conduct unified single-pass verification across all 5 receiving checks:
+1. Product / SKU Identity: Does the packaging label or barcode match the expected SKU? (yes/no/uncertain)
+2. Quantity Verification: How many cartons are observed? How many units per carton? (If carton is sealed, report carton count and infer total).
+3. Carton Physical Integrity: Check for crushing (>10% volume), water/moisture intrusion, tears, or punctures. (none/crushing/water/tears/uncertain)
+4. Unit Physical Integrity: Are inner units intact? (none/crushing/water/tears/uncertain)
+5. Specification Quality Flags: Are there defects such as wrong_colour, wrong_variant, or missing_components? (Array of strings, or empty)
+6. Overall Verdict: PASS (all match PO, no damage), FAIL (any discrepancy/defect), or UNCERTAIN (blurry image, occluded barcode, unreadable text).
+7. Decision Rationale: Concise, professional dock log explaining the findings.
+8. If UNCERTAIN: Provide uncertain_explanation and recommended_next_evidence.
+
+Return STRICT JSON ONLY matching this structure:
+{{
+  "identity_match": "yes" | "no" | "uncertain",
+  "cartons_observed": <int>,
+  "units_per_carton_observed": <int>,
+  "carton_damage": "none" | "crushing" | "water" | "tears" | "uncertain",
+  "unit_damage": "none" | "crushing" | "water" | "tears" | "uncertain",
+  "quality_flags": [<string>],
+  "overall_verdict": "PASS" | "FAIL" | "UNCERTAIN",
+  "agent_confidence": <float between 0.0 and 1.0>,
+  "decision_rationale": "<string>",
+  "uncertain_explanation": "<string or null>",
+  "recommended_next_evidence": "<string or null>"
+}}
+"""
+        contents = [prompt] + pil_images
+        response = model.generate_content(
+            contents,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        data = json.loads(response.text)
+
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        primary_image = captured_images[0] if captured_images else "fixtures/receiving/default_pallet.jpg"
+
+        cartons_rec = safe_int(data.get("cartons_observed"), cartons_ord)
+        units_rec = safe_int(data.get("units_per_carton_observed"), units_per_c_ord)
+        total_rec = cartons_rec * units_rec
+        delta = total_rec - qty_ord
+
+        qty_verdict = "PASS" if delta == 0 else "FAIL"
+        if data.get("identity_match") == "uncertain" or data.get("carton_damage") == "uncertain":
+            qty_verdict = "UNCERTAIN" if delta == 0 else "FAIL"
+
+        qty_breakdown = QuantityEvidence(
+            expected_carton_count=cartons_ord,
+            observed_carton_count=cartons_rec,
+            expected_units_per_carton=units_per_c_ord,
+            observed_units_per_carton=units_rec,
+            directly_observed_units=None,
+            inferred_total_units=total_rec,
+            expected_total_units=qty_ord,
+            quantity_discrepancy_delta=delta,
+            quantity_verdict=qty_verdict
+        )
+
+        all_checks = [
+            CheckEvidenceItem(
+                check_name="Product/SKU Identity",
+                verdict="PASS" if data.get("identity_match") == "yes" else ("FAIL" if data.get("identity_match") == "no" else "UNCERTAIN"),
+                expected_value=po_sku,
+                observed_value=po_sku if data.get("identity_match") == "yes" else "MISMATCH_OR_UNREADABLE",
+                confidence=float(data.get("agent_confidence", 0.9)),
+                evidence_source="Google Gemini Multimodal Vision API",
+                evidence_description="Gemini analyzed shipping label, barcode, and product title.",
+                image_identifier=primary_image,
+                timestamp=captured_at
+            ),
+            CheckEvidenceItem(
+                check_name="Quantity Verification",
+                verdict=qty_verdict,
+                expected_value=f"{qty_ord} units",
+                observed_value=f"{total_rec} units",
+                confidence=float(data.get("agent_confidence", 0.9)),
+                evidence_source="Google Gemini Multimodal Vision API",
+                evidence_description=f"Counted {cartons_rec} cartons x {units_rec} units/carton.",
+                image_identifier=primary_image,
+                timestamp=captured_at
+            ),
+            CheckEvidenceItem(
+                check_name="Carton Physical Integrity",
+                verdict="PASS" if data.get("carton_damage") == "none" else ("FAIL" if data.get("carton_damage") in ["crushing", "water", "tears"] else "UNCERTAIN"),
+                expected_value="Undamaged",
+                observed_value=data.get("carton_damage", "none"),
+                confidence=float(data.get("agent_confidence", 0.9)),
+                evidence_source="Google Gemini Multimodal Vision API",
+                evidence_description=f"Gemini assessed carton damage as: {data.get('carton_damage')}.",
+                image_identifier=primary_image,
+                timestamp=captured_at
+            ),
+            CheckEvidenceItem(
+                check_name="Unit Physical Integrity",
+                verdict="PASS" if data.get("unit_damage") == "none" else ("FAIL" if data.get("unit_damage") in ["crushing", "water", "tears"] else "UNCERTAIN"),
+                expected_value="Undamaged",
+                observed_value=data.get("unit_damage", "none"),
+                confidence=float(data.get("agent_confidence", 0.9)),
+                evidence_source="Google Gemini Multimodal Vision API",
+                evidence_description=f"Gemini assessed unit damage as: {data.get('unit_damage')}.",
+                image_identifier=primary_image,
+                timestamp=captured_at
+            ),
+            CheckEvidenceItem(
+                check_name="Specification & Variant Quality",
+                verdict="PASS" if not data.get("quality_flags") else "FAIL",
+                expected_value=f"Colour: {spec_col}, Variant: {spec_var}",
+                observed_value="Matches spec" if not data.get("quality_flags") else f"Flags: {', '.join(data.get('quality_flags', []))}",
+                confidence=float(data.get("agent_confidence", 0.9)),
+                evidence_source="Google Gemini Multimodal Vision API",
+                evidence_description="Gemini checked colour, variant, and accessories against spec.",
+                image_identifier=primary_image,
+                timestamp=captured_at
+            )
+        ]
+
+        q_flags = data.get("quality_flags", [])
+        compliance_input = {
+            "carton_damage": data.get("carton_damage", "none"),
+            "unit_damage": data.get("unit_damage", "none"),
+            "quality_flags": ";".join(q_flags) if isinstance(q_flags, list) else str(q_flags),
+            "qty_ordered": qty_ord,
+            "qty_received": total_rec
+        }
+        channel_rules_eval = evaluate_authoritative_compliance(compliance_input)
+
+        overall_verdict = data.get("overall_verdict", "UNCERTAIN")
+        overall_decision = "PASS" if overall_verdict == "PASS" else ("EXCEPTION" if overall_verdict == "FAIL" else "UNCERTAIN")
+
+        legacy_checks = [
+            {"check_name": c.check_name, "verdict": c.verdict, "confidence": c.confidence, "details": c.evidence_description}
+            for c in all_checks
+        ]
+
+        structured = InspectionResultSchema(
+            schema_version="1.0.0",
+            unit_id=unit_id,
+            org_id=org_id,
+            model_name=self.model_name,
+            model_version=self.model_version,
+            batch_single_pass=True,
+            batch_execution_time_ms=elapsed_ms,
+            captured_at=captured_at,
+            status="processed",
+            overall_verdict=overall_verdict,
+            overall_decision=overall_decision,
+            agent_confidence=float(data.get("agent_confidence", 0.9)),
+            decision_rationale=data.get("decision_rationale", "Gemini live multimodal vision inspection completed."),
+            uncertain_explanation=data.get("uncertain_explanation"),
+            recommended_next_evidence=data.get("recommended_next_evidence"),
+            execution_mode="REAL_AI_MULTIMODAL",
+            is_real_ai=True,
+            ai_provider="Google Gemini Multimodal Vision API",
+            what_received={
+                "cartons_received": cartons_rec,
+                "units_per_carton": units_rec,
+                "total_qty_received": total_rec,
+                "photo_refs": captured_images
+            },
+            what_expected={
+                "po_number": po_line_spec.get("po_number", "PO-7000"),
+                "po_line": po_line_spec.get("po_line", 1),
+                "supplier": po_line_spec.get("supplier", "Supplier Standard"),
+                "sku": po_sku,
+                "asin": po_line_spec.get("asin", "B0DUMMY000"),
+                "product_title": po_title,
+                "spec": {"colour": spec_col, "variant": spec_var, "components": spec_comp},
+                "cartons_ordered": cartons_ord,
+                "qty_ordered": qty_ord
+            },
+            checks=legacy_checks,
+            quantity_breakdown=qty_breakdown,
+            individual_checks=all_checks,
+            authoritative_channel_checks=channel_rules_eval
+        )
+        dump_data = structured.model_dump() if hasattr(structured, "model_dump") else structured.dict()
+
+        return {
+            "unit_id": unit_id,
+            "org_id": org_id,
+            "captured_at": captured_at,
+            "batch_execution_time_ms": elapsed_ms,
+            "batch_single_pass": True,
+            "model_name": self.model_name,
+            "model_version": self.model_version,
+            "execution_mode": "REAL_AI_MULTIMODAL",
+            "is_real_ai": True,
+            "ai_provider": "Google Gemini Multimodal Vision API",
+            "identity_match": data.get("identity_match", "uncertain"),
+            "cartons_ordered": cartons_ord,
+            "cartons_received": cartons_rec,
+            "units_per_carton_ordered": units_per_c_ord,
+            "units_per_carton_counted": units_rec,
+            "qty_ordered": qty_ord,
+            "qty_received": total_rec,
+            "directly_observed_units": None,
+            "carton_damage": data.get("carton_damage", "none"),
+            "unit_damage": data.get("unit_damage", "none"),
+            "quality_flags": ";".join(q_flags) if isinstance(q_flags, list) else str(q_flags),
+            "overall_verdict": overall_verdict,
+            "overall_decision": overall_decision,
+            "agent_confidence": float(data.get("agent_confidence", 0.9)),
+            "status": "processed",
+            "evidence_data": json.dumps(dump_data),
+            "structured_evidence": dump_data
+        }
+
+    # --------------------------------------------------------------------------
     # Fail-Open Execution (Engineering Rule 3)
     # --------------------------------------------------------------------------
 
@@ -710,6 +1009,9 @@ class ReceivingManagerAgent:
             decision_rationale=f"FAIL-OPEN ACTIVE: {reason}",
             uncertain_explanation="AI pipeline service latency exceeded threshold. Saved safely for dock continuity.",
             recommended_next_evidence="Operator may perform manual override or trigger Retry Inspection once connectivity stabilizes.",
+            execution_mode=self.execution_mode,
+            is_real_ai=self.is_real_ai,
+            ai_provider=self.ai_provider,
             what_received=what_received_data,
             what_expected=what_expected_data,
             checks=legacy_checks,
@@ -728,6 +1030,9 @@ class ReceivingManagerAgent:
             "batch_single_pass": True,
             "model_name": self.model_name,
             "model_version": self.model_version,
+            "execution_mode": self.execution_mode,
+            "is_real_ai": self.is_real_ai,
+            "ai_provider": self.ai_provider,
             "identity_match": "uncertain",
             "cartons_ordered": cartons_ord,
             "cartons_received": cartons_rec,

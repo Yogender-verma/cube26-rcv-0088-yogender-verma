@@ -1,8 +1,16 @@
 """
 Evaluation Framework & Eval Runner (Receiving Manager Agent)
-Evaluates agent decisions on a 50-unit held-out test set labeled by two independent labellers.
-Calculates Cohen's Kappa, per-check Precision/Recall, False Positives (FP), False Negatives (FN),
+Evaluates agent decisions on a 50-unit synthetic test set generated to test rule enforcement.
+Calculates Cohen's Kappa formula validation, per-check Precision/Recall, False Positives (FP), False Negatives (FN),
 UNCERTAIN rates, and failure mode analysis.
+
+HONEST METHODOLOGY STATEMENT:
+- Data Origin: 50 deterministic synthetic fixtures generated via PIL (fixtures/eval/EVAL-*.jpg).
+- Ground Truth: Synthetic reference labels defined by scenario test specifications.
+- Dual Labellers: "Labeller A" and "Labeller B" are programmatic consensus fixtures used to validate
+  the Cohen's Kappa scoring formula implementation (not independent human dock auditors).
+- Measurement Target: "Synthetic Fixture Decision Accuracy" - validates deterministic rule logic,
+  fail-open safeguards, and UNCERTAIN propagation. Does not claim empirical open-world generalization.
 """
 
 import json
@@ -10,9 +18,9 @@ import math
 from typing import Dict, Any, List
 from backend.agent import ReceivingManagerAgent
 
-# 50 Held-out synthetic Evaluation Units with dual ground truth labellers (Labeller A & Labeller B)
+# 50 Synthetic Evaluation Units with dual ground truth consensus labels for kappa validation
 EVAL_SET_50_UNITS = [
-    # Clean PASS units
+    # Clean PASS units (25 units)
     {"unit_id": f"EVAL-UNIT-{i:04d}", "org_id": "org_demo_alpha" if i % 2 == 0 else "org_demo_bravo",
      "po_number": f"PO-EVAL-{8000+i}", "po_line": 1, "supplier": "Supplier Global",
      "sku": f"SKU-EVAL-{i:02d}", "asin": f"B0EVAL{i:03d}", "product_title": f"Eval Item {i}",
@@ -22,7 +30,7 @@ EVAL_SET_50_UNITS = [
      "ground_truth_label": "PASS", "ground_truth_labeller_b": "PASS", "expected_carton_damage": "none", "expected_quality_flags": ""}
     for i in range(1, 26)
 ] + [
-    # Carton Crushing / Water / Tears (FAIL units)
+    # Carton Crushing (FAIL units, 10 units)
     {"unit_id": f"EVAL-UNIT-{i:04d}", "org_id": "org_demo_alpha" if i % 2 == 0 else "org_demo_bravo",
      "po_number": f"PO-EVAL-{8000+i}", "po_line": 1, "supplier": "Supplier Overseas",
      "sku": f"SKU-EVAL-{i:02d}", "asin": f"B0EVAL{i:03d}", "product_title": f"Eval Damaged Item {i}",
@@ -32,7 +40,7 @@ EVAL_SET_50_UNITS = [
      "ground_truth_label": "FAIL", "ground_truth_labeller_b": "FAIL", "expected_carton_damage": "crushing", "expected_quality_flags": ""}
     for i in range(26, 36)
 ] + [
-    # Spec mismatch / Missing components (FAIL units)
+    # Spec mismatch / Missing components (FAIL units, 8 units)
     {"unit_id": f"EVAL-UNIT-{i:04d}", "org_id": "org_demo_alpha" if i % 2 == 0 else "org_demo_bravo",
      "po_number": f"PO-EVAL-{8000+i}", "po_line": 1, "supplier": "Supplier North",
      "sku": f"SKU-EVAL-{i:02d}", "asin": f"B0EVAL{i:03d}", "product_title": f"Eval Spec Mismatch {i}",
@@ -43,7 +51,7 @@ EVAL_SET_50_UNITS = [
      "ground_truth_label": "FAIL", "ground_truth_labeller_b": "FAIL", "expected_carton_damage": "none", "expected_quality_flags": "wrong_colour;missing_components"}
     for i in range(36, 44)
 ] + [
-    # Blurry / Occluded / Low Lighting (UNCERTAIN units)
+    # Blurry / Occluded / Low Lighting (UNCERTAIN units, 7 units)
     {"unit_id": f"EVAL-UNIT-{i:04d}", "org_id": "org_demo_alpha" if i % 2 == 0 else "org_demo_bravo",
      "po_number": f"PO-EVAL-{8000+i}", "po_line": 1, "supplier": "Supplier West",
      "sku": f"SKU-EVAL-{i:02d}", "asin": f"B0EVAL{i:03d}", "product_title": f"Eval Occluded Photo {i}",
@@ -93,6 +101,15 @@ def run_evaluation_suite() -> Dict[str, Any]:
         "fail_open_timeout_safeguard": 0
     }
 
+    # Per-check dynamic metrics accumulator
+    check_metrics_raw = {
+        "identity_match": {"correct": 0, "fp": 0, "fn": 0, "uncertain": 0},
+        "quantity_verification": {"correct": 0, "fp": 0, "fn": 0, "uncertain": 0},
+        "carton_damage": {"correct": 0, "fp": 0, "fn": 0, "uncertain": 0},
+        "unit_damage": {"correct": 0, "fp": 0, "fn": 0, "uncertain": 0},
+        "quality_flags": {"correct": 0, "fp": 0, "fn": 0, "uncertain": 0}
+    }
+
     results_list = []
 
     for unit in EVAL_SET_50_UNITS:
@@ -111,6 +128,51 @@ def run_evaluation_suite() -> Dict[str, Any]:
         
         verdict = agent_res["overall_verdict"]
         agent_verdicts.append(verdict)
+
+        # Track check 1: Identity Match
+        if agent_res["identity_match"] == "uncertain":
+            check_metrics_raw["identity_match"]["uncertain"] += 1
+        elif agent_res["identity_match"] == "yes":
+            check_metrics_raw["identity_match"]["correct"] += 1
+        else:
+            check_metrics_raw["identity_match"]["fn"] += 1
+
+        # Track check 2: Quantity Verification
+        if agent_res["qty_received"] == agent_res["qty_ordered"]:
+            check_metrics_raw["quantity_verification"]["correct"] += 1
+        else:
+            check_metrics_raw["quantity_verification"]["fn"] += 1
+
+        # Track check 3: Carton Damage
+        c_dmg = agent_res["carton_damage"]
+        exp_c_dmg = unit["expected_carton_damage"]
+        if c_dmg == "uncertain":
+            check_metrics_raw["carton_damage"]["uncertain"] += 1
+        elif c_dmg == exp_c_dmg:
+            check_metrics_raw["carton_damage"]["correct"] += 1
+        elif c_dmg != "none" and exp_c_dmg == "none":
+            check_metrics_raw["carton_damage"]["fp"] += 1
+        else:
+            check_metrics_raw["carton_damage"]["fn"] += 1
+
+        # Track check 4: Unit Damage
+        u_dmg = agent_res["unit_damage"]
+        if u_dmg == "uncertain":
+            check_metrics_raw["unit_damage"]["uncertain"] += 1
+        elif u_dmg == "none":
+            check_metrics_raw["unit_damage"]["correct"] += 1
+        else:
+            check_metrics_raw["unit_damage"]["fn"] += 1
+
+        # Track check 5: Quality Flags
+        qf = set(f.strip() for f in agent_res["quality_flags"].split(";") if f.strip())
+        eqf = set(f.strip() for f in unit["expected_quality_flags"].split(";") if f.strip())
+        if qf == eqf:
+            check_metrics_raw["quality_flags"]["correct"] += 1
+        elif qf and not eqf:
+            check_metrics_raw["quality_flags"]["fp"] += 1
+        else:
+            check_metrics_raw["quality_flags"]["fn"] += 1
 
         if verdict == "UNCERTAIN":
             uncertain_count += 1
@@ -145,11 +207,27 @@ def run_evaluation_suite() -> Dict[str, Any]:
     f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
     overall_accuracy = (tp + tn) / (total_units - uncertain_count) if (total_units - uncertain_count) > 0 else 0.0
 
+    # Build dynamically calculated per-check metrics (no hardcoded fake constants)
+    per_check_metrics = {}
+    for chk, counts in check_metrics_raw.items():
+        evaluated_units = total_units - counts["uncertain"]
+        acc = (counts["correct"] / evaluated_units * 100.0) if evaluated_units > 0 else 100.0
+        per_check_metrics[chk] = {
+            "accuracy": round(acc, 1),
+            "fp": counts["fp"],
+            "fn": counts["fn"],
+            "uncertain": counts["uncertain"]
+        }
+
     return {
         "evaluation_summary": {
+            "evaluation_type": "SYNTHETIC_FIXTURE_RULE_VALIDATION",
+            "methodology_description": "Deterministic rule & heuristic decision accuracy on 50 synthetic test fixtures",
+            "annotator_type": "SYNTHETIC_CONSENSUS_LABELS (for Cohen's Kappa scoring routine validation)",
             "total_units_evaluated": total_units,
             "cohens_kappa_inter_annotator_agreement": kappa,
             "overall_accuracy_excluding_uncertain": round(overall_accuracy * 100, 1),
+            "metric_display_name": "Synthetic Fixture Decision Accuracy",
             "precision": round(precision, 3),
             "recall": round(recall, 3),
             "f1_score": round(f1_score, 3),
@@ -158,13 +236,8 @@ def run_evaluation_suite() -> Dict[str, Any]:
             "uncertain_verdicts_count": uncertain_count,
             "uncertain_rate_pct": round((uncertain_count / total_units) * 100, 1)
         },
-        "per_check_metrics": {
-            "identity_match": {"accuracy": 96.0, "fp": 1, "fn": 1, "uncertain": 2},
-            "quantity_verification": {"accuracy": 98.0, "fp": 0, "fn": 1, "uncertain": 0},
-            "carton_damage": {"accuracy": 92.0, "fp": 2, "fn": 2, "uncertain": 3},
-            "unit_damage": {"accuracy": 90.0, "fp": 2, "fn": 3, "uncertain": 2},
-            "quality_flags": {"accuracy": 94.0, "fp": 1, "fn": 2, "uncertain": 0}
-        },
+        "per_check_metrics": per_check_metrics,
         "failure_modes_breakdown": failure_modes,
         "sample_unit_results": results_list[:10]
     }
+

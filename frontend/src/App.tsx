@@ -7,21 +7,26 @@ import { EvalDashboard } from './components/EvalDashboard';
 import { TenancySandbox } from './components/TenancySandbox';
 import { ContractViewer } from './components/ContractViewer';
 import { DeliverablesHub } from './components/DeliverablesHub';
-import { fetchRecords, retryInspection, ReceivingRecord } from './api';
-import { Box, Camera, History, BarChart3, Lock, FileText, BookOpen, Layers, Cpu, ShieldCheck } from 'lucide-react';
+import { fetchRecords, fetchHealth, retryInspection, ReceivingRecord, HealthStatus } from './api';
+import { Box, Camera, History, BarChart3, Lock, FileText, BookOpen, Layers, Cpu, ShieldCheck, AlertTriangle } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'station' | 'history' | 'eval' | 'tenancy' | 'contract' | 'docs'>('station');
   const [orgId, setOrgId] = useState('org_demo_alpha');
   const [records, setRecords] = useState<ReceivingRecord[]>([]);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
 
   const [selectedRecord, setSelectedRecord] = useState<ReceivingRecord | null>(null);
   const [overrideRecord, setOverrideRecord] = useState<ReceivingRecord | null>(null);
 
   const loadData = async () => {
     try {
-      const recs = await fetchRecords(orgId);
+      const [recs, h] = await Promise.all([
+        fetchRecords(orgId),
+        fetchHealth().catch(() => null)
+      ]);
       setRecords(recs);
+      if (h) setHealth(h);
     } catch (err: any) {
       console.error(err);
     }
@@ -66,9 +71,15 @@ export const App: React.FC = () => {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span className="badge badge-pass" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <Cpu size={14} /> Gemini 3.6 Vision
-            </span>
+            {health?.is_real_ai ? (
+              <span className="badge badge-pass" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <Cpu size={14} /> REAL AI: {health.batch_model}
+              </span>
+            ) : (
+              <span className="badge" style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                <AlertTriangle size={14} /> DEMO MODE (Synthetic Heuristic Engine)
+              </span>
+            )}
             <span className="badge badge-pass" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
               <ShieldCheck size={14} /> RLS Forced
             </span>

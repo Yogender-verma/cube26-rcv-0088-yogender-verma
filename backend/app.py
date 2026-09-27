@@ -79,11 +79,15 @@ class OverrideRequest(BaseModel):
 # 1. Health Check
 @app.get("/api/health")
 def health():
+    agent = ReceivingManagerAgent()
     return {
         "status": "healthy",
         "service": "01_RECEIVING_MANAGER",
         "tenancy_isolation": "ENABLED_AND_FORCED",
-        "batch_model": "Gemini-3.6-Vision-Batch",
+        "execution_mode": agent.execution_mode,
+        "is_real_ai": agent.is_real_ai,
+        "batch_model": agent.model_name,
+        "ai_provider": agent.ai_provider,
         "fail_open_support": True,
         "track": "RCV#1 — Receiving Manager",
         "tagline": "Verify what actually arrived."
