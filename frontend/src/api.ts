@@ -1,6 +1,7 @@
 export interface ReceivingRecord {
   record_id: string;
   unit_id: string;
+  shipment_id?: string | null;
   org_id: string;
   po_number: string;
   po_line: number;
@@ -29,10 +30,12 @@ export interface ReceivingRecord {
   status: string;
   evidence_data?: string;
   audit_overrides?: any[];
+  attempts?: any[];
 }
 
 export interface InspectionPayload {
   unit_id: string;
+  shipment_id?: string | null;
   po_number: string;
   po_line: number;
   supplier: string;
@@ -169,3 +172,41 @@ export async function uploadPhoto(file: File, orgId: string) {
   if (!res.ok) throw new Error('Photo upload failed');
   return res.json();
 }
+
+export async function fetchPurchaseOrders(orgId: string) {
+  const res = await fetch(`${API_BASE}/purchase-orders`, {
+    headers: { 'X-Org-ID': orgId }
+  });
+  if (!res.ok) throw new Error('Failed to fetch purchase orders');
+  return res.json();
+}
+
+export async function reinspectWithEvidence(recordId: string, orgId: string, photoRefs: string[], notes?: string) {
+  const res = await fetch(`${API_BASE}/records/${recordId}/reinspect`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Org-ID': orgId
+    },
+    body: JSON.stringify({ photo_refs: photoRefs, notes })
+  });
+  if (!res.ok) throw new Error('Failed to submit additional evidence and reinspect');
+  return res.json();
+}
+
+export async function fetchRecordAttempts(recordId: string, orgId: string) {
+  const res = await fetch(`${API_BASE}/records/${recordId}/attempts`, {
+    headers: { 'X-Org-ID': orgId }
+  });
+  if (!res.ok) throw new Error('Failed to fetch inspection attempts history');
+  return res.json();
+}
+
+export async function fetchLiveMetrics(orgId: string) {
+  const res = await fetch(`${API_BASE}/metrics/live`, {
+    headers: { 'X-Org-ID': orgId }
+  });
+  if (!res.ok) throw new Error('Failed to fetch live operational metrics');
+  return res.json();
+}
+

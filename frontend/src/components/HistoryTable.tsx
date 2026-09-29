@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ReceivingRecord } from '../api';
-import { Search, Eye, Edit3, ShieldAlert, CheckCircle, AlertTriangle, FileText, RefreshCw } from 'lucide-react';
+import { Search, Eye, Edit3, ShieldAlert, CheckCircle, AlertTriangle, FileText, RefreshCw, UserCheck, Shield } from 'lucide-react';
 
 interface Props {
   records: ReceivingRecord[];
@@ -24,17 +24,33 @@ export const HistoryTable: React.FC<Props> = ({ records, onSelectRecord, onOpenO
     return matchSearch && matchVerdict;
   });
 
+  const formatDate = (isoStr: string) => {
+    if (!isoStr) return '—';
+    try {
+      const d = new Date(isoStr);
+      return d.toLocaleDateString(undefined, {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch {
+      return isoStr;
+    }
+  };
+
   return (
     <div className="glass-panel" style={{ padding: '24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
         <div>
-          <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Receiving Inspection Audit History</h2>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Receiving Inspection History & Audit Trail</h2>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-            Scoped Row-Level Security (Tenant Isolation Active) · Total: {filtered.length} records
+            Row-Level Security Scoped · Total: {filtered.length} Inbound Records Logged
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
           {/* Verdict Filters */}
           <div style={{ display: 'flex', background: 'var(--bg-tertiary)', padding: '3px', borderRadius: '6px' }}>
             {['ALL', 'PASS', 'FAIL', 'UNCERTAIN', 'PENDING_REVIEW'].map(v => (
@@ -63,7 +79,7 @@ export const HistoryTable: React.FC<Props> = ({ records, onSelectRecord, onOpenO
             <input
               type="text"
               className="form-control"
-              placeholder="Search Record, Unit, SKU..."
+              placeholder="Search Record, PO, SKU..."
               style={{ paddingLeft: '32px' }}
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
@@ -77,76 +93,115 @@ export const HistoryTable: React.FC<Props> = ({ records, onSelectRecord, onOpenO
         <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-muted)' }}>
-              <th style={{ padding: '10px' }}>Record ID</th>
-              <th style={{ padding: '10px' }}>Unit ID</th>
-              <th style={{ padding: '10px' }}>PO / Supplier</th>
-              <th style={{ padding: '10px' }}>SKU & Spec</th>
-              <th style={{ padding: '10px' }}>Qty (Rec/Ord)</th>
-              <th style={{ padding: '10px' }}>Damage</th>
-              <th style={{ padding: '10px' }}>Quality Flags</th>
-              <th style={{ padding: '10px' }}>Overall Verdict</th>
+              <th style={{ padding: '10px' }}>Inspection ID</th>
+              <th style={{ padding: '10px' }}>PO Number</th>
+              <th style={{ padding: '10px' }}>SKU & Product</th>
+              <th style={{ padding: '10px' }}>Date / Time</th>
+              <th style={{ padding: '10px' }}>Result</th>
+              <th style={{ padding: '10px' }}>Confidence</th>
+              <th style={{ padding: '10px' }}>Operator Status</th>
               <th style={{ padding: '10px', textAlign: 'right' }}>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map(r => (
-              <tr key={r.record_id} style={{ borderBottom: '1px solid var(--border-color)', transition: 'background 0.15s' }}>
-                <td style={{ padding: '10px', fontWeight: 600 }} className="code-font">{r.record_id}</td>
-                <td style={{ padding: '10px' }} className="code-font">{r.unit_id}</td>
-                <td style={{ padding: '10px' }}>
-                  <div>{r.po_number}</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{r.supplier}</div>
-                </td>
-                <td style={{ padding: '10px' }}>
-                  <div className="code-font">{r.sku}</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{r.spec_colour} | {r.spec_variant}</div>
-                </td>
-                <td style={{ padding: '10px' }}>
-                  <span style={{ color: r.qty_received !== r.qty_ordered ? 'var(--accent-rose)' : 'inherit', fontWeight: 600 }}>
-                    {r.qty_received} / {r.qty_ordered}
-                  </span>
-                </td>
-                <td style={{ padding: '10px' }}>
-                  <div style={{ fontSize: '0.75rem' }}>Ctn: <strong style={{ color: r.carton_damage !== 'none' ? 'var(--accent-amber)' : 'inherit' }}>{r.carton_damage}</strong></div>
-                  <div style={{ fontSize: '0.75rem' }}>Unit: <strong style={{ color: r.unit_damage !== 'none' ? 'var(--accent-amber)' : 'inherit' }}>{r.unit_damage}</strong></div>
-                </td>
-                <td style={{ padding: '10px' }}>
-                  {r.quality_flags ? (
-                    <span style={{ background: 'rgba(244,63,94,0.15)', color: '#fb7185', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem' }}>
-                      {r.quality_flags}
-                    </span>
-                  ) : (
-                    <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>
-                  )}
-                </td>
-                <td style={{ padding: '10px' }}>
-                  <span className={`badge ${r.overall_verdict === 'PASS' ? 'badge-pass' : (r.overall_verdict === 'FAIL' ? 'badge-fail' : (r.overall_verdict === 'PENDING_REVIEW' ? 'badge-pending' : 'badge-uncertain'))}`}>
-                    {r.overall_verdict}
-                  </span>
-                </td>
-                <td style={{ padding: '10px', textAlign: 'right' }}>
-                  <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
-                    {(r.overall_verdict === 'PENDING_REVIEW' || r.status === 'pending_review') && onRetryRecord && (
-                      <button className="btn btn-primary" style={{ padding: '4px 8px', fontSize: '0.75rem', background: '#8b5cf6' }} onClick={() => onRetryRecord(r)} title="Retry Inspection">
-                        <RefreshCw size={14} /> Retry
-                      </button>
+            {filtered.map(r => {
+              const hasOverrides = r.audit_overrides && r.audit_overrides.length > 0;
+              const confPct = Math.round((r.agent_confidence || 0) * 100);
+
+              return (
+                <tr
+                  key={r.record_id}
+                  onClick={() => onSelectRecord(r)}
+                  style={{
+                    borderBottom: '1px solid var(--border-color)',
+                    cursor: 'pointer',
+                    transition: 'background 0.15s'
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <td style={{ padding: '10px', fontWeight: 700 }} className="code-font">
+                    {r.record_id}
+                  </td>
+                  <td style={{ padding: '10px' }}>
+                    <div className="code-font" style={{ fontWeight: 600 }}>{r.po_number}</div>
+                    {r.shipment_id && (
+                      <div style={{ fontSize: '0.72rem', color: 'var(--accent-blue)', fontWeight: 600 }}>
+                        {r.shipment_id}
+                      </div>
                     )}
-                    <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => onSelectRecord(r)} title="Evidence Deep-Dive">
-                      <Eye size={14} /> Evidence
-                    </button>
-                    <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => onOpenOverride(r)} title="Log Operator Override">
-                      <Edit3 size={14} /> Override
-                    </button>
-                    <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => onViewContract(r)} title="Cross-Pod Contract JSON">
-                      <FileText size={14} /> JSON
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{r.supplier}</div>
+                  </td>
+                  <td style={{ padding: '10px' }}>
+                    <div className="code-font" style={{ fontWeight: 600 }}>{r.sku}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{r.product_title}</div>
+                  </td>
+                  <td style={{ padding: '10px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                    {formatDate(r.captured_at)}
+                  </td>
+                  <td style={{ padding: '10px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                      <span className={`badge ${r.overall_verdict === 'PASS' ? 'badge-pass' : (r.overall_verdict === 'FAIL' ? 'badge-fail' : (r.overall_verdict === 'PENDING_REVIEW' ? 'badge-pending' : 'badge-uncertain'))}`}>
+                        {r.overall_verdict}
+                      </span>
+                      {r.attempts && r.attempts.length > 1 && (
+                        <span style={{ fontSize: '0.65rem', background: 'rgba(139,92,246,0.15)', color: '#c4b5fd', padding: '1px 5px', borderRadius: '3px', fontWeight: 600 }}>
+                          Att. {r.attempts.length}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td style={{ padding: '10px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span className="code-font" style={{ fontSize: '0.8rem', fontWeight: 600, color: r.overall_verdict === 'UNCERTAIN' ? '#fbbf24' : '#34d399' }}>
+                        {confPct}%
+                      </span>
+                      <div style={{ width: '40px', height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
+                        <div style={{ width: `${confPct}%`, height: '100%', background: r.overall_verdict === 'PASS' ? '#10b981' : (r.overall_verdict === 'FAIL' ? '#f43f5e' : '#f59e0b') }} />
+                      </div>
+                    </div>
+                  </td>
+                  <td style={{ padding: '10px' }}>
+                    {hasOverrides ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', color: '#fbbf24', background: 'rgba(245,158,11,0.12)', padding: '2px 8px', borderRadius: '4px', border: '1px solid rgba(245,158,11,0.25)' }}>
+                        <UserCheck size={12} /> Overridden ({r.audit_overrides?.length})
+                      </span>
+                    ) : (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        <Shield size={12} /> AI Verified
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: '10px', textAlign: 'right' }} onClick={e => e.stopPropagation()}>
+                    <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                      {(r.overall_verdict === 'PENDING_REVIEW' || r.status === 'pending_review') && onRetryRecord && (
+                        <button className="btn btn-primary" style={{ padding: '4px 8px', fontSize: '0.75rem', background: '#8b5cf6' }} onClick={() => onRetryRecord(r)} title="Retry Inspection">
+                          <RefreshCw size={14} /> Retry
+                        </button>
+                      )}
+                      <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => onSelectRecord(r)} title="Evidence Deep-Dive">
+                        <Eye size={14} /> Evidence
+                      </button>
+                      <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => onOpenOverride(r)} title="Log Operator Override">
+                        <Edit3 size={14} /> Override
+                      </button>
+                      <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem' }} onClick={() => onViewContract(r)} title="Cross-Pod Contract JSON">
+                        <FileText size={14} /> JSON
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {filtered.length === 0 && (
+        <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+          No inspection records found.
+        </div>
+      )}
     </div>
   );
 };

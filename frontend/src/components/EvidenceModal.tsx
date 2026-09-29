@@ -45,7 +45,7 @@ export const EvidenceModal: React.FC<Props> = ({ record, onClose }) => {
               Decision Evidence & Traceability Record ({record.record_id})
             </h2>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-              Unit: {record.unit_id} · Tenant: {record.org_id} · Timestamp: {record.captured_at}
+              Unit: {record.unit_id} · PO: {record.po_number} · SKU: {record.sku} {record.shipment_id ? `· Shipment ID: ${record.shipment_id}` : '· Shipment ID: null'} · Tenant: {record.org_id} · Timestamp: {record.captured_at}
             </div>
           </div>
           <button className="btn btn-secondary" style={{ padding: '6px' }} onClick={onClose}>
@@ -135,6 +135,33 @@ export const EvidenceModal: React.FC<Props> = ({ record, onClose }) => {
                 <span style={{ color: 'var(--text-muted)' }}>Reason: "{ov.override_reason}"</span>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Inspection Attempt Audit Trail (Priority 2) */}
+        {record.attempts && record.attempts.length > 0 && (
+          <div style={{ background: 'rgba(139, 92, 246, 0.08)', padding: '14px', borderRadius: '8px', border: '1px solid rgba(139, 92, 246, 0.25)', marginBottom: '20px' }}>
+            <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#c4b5fd', marginBottom: '8px' }}>
+              Inspection Attempt Audit Trail (Priority 2: Multi-Attempt Preservation)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {record.attempts.map((att: any, idx: number) => (
+                <div key={idx} style={{ fontSize: '0.8rem', background: 'rgba(0,0,0,0.25)', padding: '8px 12px', borderRadius: '6px', borderLeft: `3px solid ${att.overall_verdict === 'PASS' ? '#10b981' : (att.overall_verdict === 'FAIL' ? '#f43f5e' : (att.overall_verdict === 'PENDING_REVIEW' ? '#8b5cf6' : '#f59e0b'))}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontWeight: 700 }}>Attempt #{att.attempt_number} — <span className="code-font">{att.overall_verdict}</span></span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{att.captured_at}</span>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                    Mode: <code>{att.execution_mode}</code> {att.ai_provider ? `(${att.ai_provider})` : ''} · Confidence: {Math.round((att.agent_confidence || 0) * 100)}%
+                  </div>
+                  {att.decision_rationale && (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                      {att.decision_rationale}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
