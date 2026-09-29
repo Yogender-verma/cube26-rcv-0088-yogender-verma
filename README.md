@@ -218,6 +218,58 @@ Every inspection produces a structured decision backed by photographic proof and
 
 ---
 
+## 1.1 Production Receiving Workflow
+
+The warehouse workstation provides an operator-first receiving experience:
+
+```text
+PURCHASE ORDER / EXPECTED DATA
+               +
+       RECEIVING PHOTO(S)
+               ↓
+       AI VISUAL INSPECTION
+               ↓
+   COMPARE EXPECTED VS OBSERVED
+               ↓
+    PASS / FAIL / UNCERTAIN
+               ↓
+EVIDENCE + CONFIDENCE + RECOMMENDED ACTION
+```
+
+1. **Select / Scan Purchase Order:**
+   The operator identifies or selects the incoming PO from the dropdown or barcode scan.
+   The expected shipment data (PO number, supplier, SKU, product title, colour, variant, components, expected cartons, units per carton, total quantity) is automatically displayed.
+   *No manual retyping of shipment metadata is required by the operator.*
+2. **Upload / Capture Receiving Photographs:**
+   The operator attaches physical receiving photos (carton labels, pallet integrity, product unpackaging).
+   Multi-angle photos and dock camera feeds are supported.
+3. **Run AI Inspection:**
+   Click **RUN AI INSPECTION**. The engine analyzes physical condition, verifies identity, computes quantity math, and inspects quality specifications in a single unified pass.
+4. **Review Status (PASS / FAIL / UNCERTAIN / PENDING REVIEW):**
+   - **PASS**: Shipment matches purchase order.
+   - **FAIL**: Discrepancy detected (shortage, extra units, wrong SKU, damage, or defect).
+   - **UNCERTAIN**: Photographic evidence is occluded, blurred, or insufficient.
+   - **PENDING REVIEW**: Pipeline timeout triggers fail-open behavior without halting the dock line.
+5. **Review Expected vs Observed & Visual Evidence:**
+   Inspect the itemized comparison table and view visual bounding boxes overlaid on the received image highlighting detected anomalies.
+6. **Operational Next Action & Audit Trail:**
+   - **PASS**: Proceed with receiving. Goods verified against PO.
+   - **FAIL**: Hold shipment for operator review.
+   - **UNCERTAIN**: Capture a clearer label/photo or inspect the item manually.
+   - **PENDING REVIEW**: AI inspection could not be completed. Retry or perform manual inspection.
+   - **Operator Override**: If the operator overrides an AI decision, the original AI evidence is permanently preserved, while logging the operator decision, timestamp, and mandatory justification in the audit trail.
+
+### Execution Modes & Evaluation Transparency
+
+- **Real Gemini Multimodal Mode (`REAL_AI_MULTIMODAL`):**
+  When `GEMINI_API_KEY` is configured in the environment, the system executes the real Gemini multimodal vision path using Gemini 1.5 Flash. If the API encounters a network failure or timeout, it safely fails open to `PENDING_REVIEW` with retry capability.
+- **Demo / Test Mode (`DEMO_MODE_SYNTHETIC`):**
+  When running without an API key, the system operates in Demo Mode using deterministic heuristic inspection rules and reproducible fixtures. All 11 challenge preset edge cases are preserved in the dedicated Demo / Test Mode tab.
+- **Synthetic Evaluation Limitations:**
+  The synthetic benchmark validates deterministic decision logic and system behavior; it does not establish real-world visual model accuracy. Programmatically generated labels do not represent independent human annotation, and benchmark agreement metrics evaluate decision logic consistency rather than human inter-rater reliability.
+
+---
+
 ## 2. Key Capabilities & Engineering Rule Compliance
 
 | Requirement / Rule | Implementation Mechanism | Status |
@@ -336,19 +388,39 @@ run_app.bat
 
 ## 5. Running Automated Tests
 
-Run the full automated test suite (39 test cases covering all scenarios, security, fail-open, and edge cases):
+Run the full automated test suite (58 test cases covering all scenarios, security, fail-open, attempt history, shipment_id, and cross-pod integration):
 
 ```bash
 python -m pytest tests/ -v
 ```
 
 ### Test Suite Structure:
+- `tests/test_production_integration.py` — Comprehensive suite verifying all 20 integration priorities (shipment_id persistence, cross-pod check keys, immutable attempt history, live uncertainty metrics, occlusion reinspection, candidate discrimination, fail-open semantics).
 - `tests/test_scenarios_14.py` — The 14 official required track scenarios (Shipment OK, Short, Extra, Wrong SKU, Wrong Variant, Crushed Carton, Water Damage, Tears, Missing Component, Ambiguous, Model Failure, Multi-Image, Override, Tenant Isolation).
 - `tests/test_security_tenancy.py` — Multi-tenant RLS zero-leak test, cross-tenant image 403 Forbidden test, and path traversal block test.
 - `tests/test_fail_open_retry.py` — Pipeline timeout circuit breaker, PENDING_REVIEW status, and `POST /api/records/{id}/retry` re-evaluation test.
 - `tests/test_decision_and_evidence.py` — Deterministic decision aggregation rules, evidence schema validation, and operator override audit retention.
 - `tests/test_edge_cases_validation.py` — Quantity arithmetic, empty image upload, duplicate images, photo upload validation, and malformed PO inputs.
 - `tests/test_evaluation_metrics.py` — Held-out evaluation harness verification, Cohen's Kappa, and metrics calculation.
+
+---
+
+## 5b. Production Integration Architecture & Semantics
+
+### Verdict Semantics:
+- **PASS**: Objective visual and counted evidence confirms goods match the Purchase Order specification (SKU, quantity, carton integrity, undamaged units, correct variant).
+- **FAIL / EXCEPTION**: Visual or counted evidence proves a discrepancy (shortage, extra units, wrong SKU, damage, or variant mismatch).
+- **UNCERTAIN**: Visual evidence is insufficient, blurry, or occluded to make a confident automated decision. *Rule: UNCERTAIN never automatically converts to PASS.*
+- **PENDING_REVIEW**: Upstream AI service latency timeout or API disruption triggered fail-open circuit breaker. Dock operations continue uninterrupted, capture is saved, and record is held for operator retry or manual verification. *Rule: Fail-open never silently falls back to synthetic mock data.*
+
+### Key Architecture Components:
+1. **Shipment ID (`shipment_id`)**: Persisted end-to-end across `InspectionRequest`, SQLite `receiving_records` (with automatic migration for backwards compatibility), Cross-Pod Evidence Contract (`subject.shipment_id`), PO catalog, and frontend UI.
+2. **Immutable Attempt History (`inspection_attempts`)**: When a fail-open record is retried via `POST /api/records/{id}/retry`, Attempt 1 (PENDING_REVIEW) is preserved verbatim with original timestamps, and Attempt 2 (PASS/FAIL/UNCERTAIN) is created. The full attempt audit trail is exposed via `GET /api/records/{id}/attempts` and rendered in the UI.
+3. **Cross-Pod Contract Key Alignment**: Internal representation maps cleanly to agreed standard cross-pod check keys: `identity_matches_po`, `quantity_matches_po`, `carton_undamaged`, `unit_undamaged`, and `variant_correct`.
+4. **Catalogue Candidate Discrimination**: Pluggable candidate provider (`backend/candidate_provider.py`) retrieves candidate SKU sets from warehouse sample catalogue, supplying Gemini Vision with expected and look-alike candidate SKUs for visual discrimination.
+5. **Live Uncertainty Metrics**: `GET /api/metrics/live` computes live operational uncertainty rate: `uncertain_rate = UNCERTAIN / (PASS + FAIL + UNCERTAIN)`, excluding `PENDING_REVIEW` from the denominator. Displayed in Reports UI distinctly from synthetic evaluation benchmarks.
+6. **Occlusion / Additional Evidence Workflow**: For `UNCERTAIN` receipts, the UI provides an interactive `[ Add Evidence & Reinspect ]` workflow to submit additional photos and re-run inspection, creating Attempt N+1 while maintaining the original UNCERTAIN attempt.
+7. **Optional Bounding Boxes**: Evidence schema supports optional `bounding_box` coordinates `{x, y, w, h}` for visual explainability without making boxes decision-critical.
 
 ---
 
@@ -366,21 +438,30 @@ Full report and methodology are documented in [`EVAL_REPORT.md`](EVAL_REPORT.md)
 
 ---
 
-## 7. Demo Scenarios & Interactive Guide
+## 7. Application Navigation & Demo Scenarios
 
-Open `http://localhost:5173` in your browser. The Dock Station provides 11 one-click preset buttons:
+Open `http://localhost:5173` in your browser. The application features a production warehouse layout:
 
-1. **Preset 1 (Correct Shipment):** 24/24 units, pristine carton, matching SKU -> **PASS**.
-2. **Preset 2 (Short Shipment):** 20 counted vs 24 ordered (-4 units) -> **EXCEPTION (FAIL)**.
-3. **Preset 3 (Extra Units):** 28 counted vs 24 ordered (+4 over) -> **EXCEPTION (FAIL)**.
-4. **Preset 4 (Wrong SKU):** Label shows RED-MUG-002 instead of BLUE-BOTTLE-001 -> **EXCEPTION (FAIL)**.
-5. **Preset 5 (Wrong Variant):** Red bottle received instead of Blue bottle -> **EXCEPTION (FAIL)**.
-6. **Preset 6 (Crushed Carton):** Visible compression on corner -> **EXCEPTION (FAIL)**.
-7. **Preset 7 (Water Damaged):** Moisture stains on carton bottom -> **EXCEPTION (FAIL)**.
-8. **Preset 8 (Torn Packaging):** Punctured outer box cardboard -> **EXCEPTION (FAIL)**.
-9. **Preset 9 (Missing Components):** Protein tub missing measuring scoop -> **EXCEPTION (FAIL)**.
-10. **Preset 10 (Ambiguous Case):** Lens blur and warehouse spotlight glare -> **UNCERTAIN** (Guidance displayed).
-11. **Preset 11 (Pipeline Timeout):** Simulates model timeout -> **PENDING_REVIEW** (Operations line not blocked; Retry button active).
+### Main Navigation:
+- **Receiving (Default)**: Production dock receiving screen. Select any PO, review auto-populated expected specifications, attach receiving photos, click **RUN AI INSPECTION**, and review the hero status (PASS/FAIL/UNCERTAIN), visual bounding boxes, and Expected vs Observed comparison.
+- **Inspection History**: Searchable, filterable audit history displaying Inspection ID, PO, SKU, Date/time, Result, Confidence %, and Operator status with clickable row evidence modals.
+- **Purchase Orders**: Enterprise inbound PO catalog with 1-click **Receive Shipment** navigation.
+- **Reports**: Synthetic benchmark metrics (`EvalDashboard`), Cross-Pod JSON Evidence Contract (`ContractViewer`), and Authoritative Channel Rules compliance.
+- **Settings**: Active tenant switcher (`org_demo_alpha` vs `org_demo_bravo`), Tenancy Security Sandbox, and Gemini model config.
+- **Demo / Test Mode**: Dedicated demonstration tab preserving all 11 challenge preset scenarios with 1-click test execution and "Load in Receiving Station" capability.
+
+### 11 Challenge Scenarios (Preserved in Demo / Test Mode):
+1. **Scenario 1 (Correct Shipment):** 24/24 units, pristine carton, matching SKU -> **PASS**.
+2. **Scenario 2 (Short Shipment):** 20 counted vs 24 ordered (-4 units) -> **EXCEPTION (FAIL)**.
+3. **Scenario 3 (Extra Units):** 28 counted vs 24 ordered (+4 over) -> **EXCEPTION (FAIL)**.
+4. **Scenario 4 (Wrong SKU):** Label shows RED-MUG-002 instead of BLUE-BOTTLE-001 -> **EXCEPTION (FAIL)**.
+5. **Scenario 5 (Wrong Variant):** Red bottle received instead of Blue bottle -> **EXCEPTION (FAIL)**.
+6. **Scenario 6 (Crushed Carton):** Visible compression on corner -> **EXCEPTION (FAIL)**.
+7. **Scenario 7 (Water Damaged):** Moisture stains on carton bottom -> **EXCEPTION (FAIL)**.
+8. **Scenario 8 (Torn Packaging):** Punctured outer box cardboard -> **EXCEPTION (FAIL)**.
+9. **Scenario 9 (Missing Components):** Protein tub missing measuring scoop -> **EXCEPTION (FAIL)**.
+10. **Scenario 10 (Ambiguous Case):** Lens blur and warehouse spotlight glare -> **UNCERTAIN** (Guidance displayed).
+11. **Scenario 11 (Pipeline Timeout):** Simulates model timeout -> **PENDING_REVIEW** (Operations line not blocked; Retry button active).
 
 ---
 
