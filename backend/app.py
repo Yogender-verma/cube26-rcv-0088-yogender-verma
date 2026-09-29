@@ -17,7 +17,8 @@ import json
 
 from backend.db import (
     init_db, get_records_by_org, get_record_by_id_scoped,
-    save_operator_override, get_db_connection
+    save_operator_override, get_db_connection,
+    record_inspection_attempt, get_attempts_by_record
 )
 from backend.agent import ReceivingManagerAgent
 from backend.eval_runner import run_evaluation_suite
@@ -50,12 +51,13 @@ app.add_middleware(
 # Pydantic Schemas
 class InspectionRequest(BaseModel):
     unit_id: str
+    shipment_id: Optional[str] = None
     po_number: str
     po_line: int = 1
     supplier: str = "Supplier Standard"
     sku: str
     asin: str = "B0DUMMY000"
-    product_title: str
+    product_title: str = "Standard Inbound Product"
     spec_colour: Optional[str] = "n/a"
     spec_variant: Optional[str] = "n/a"
     spec_components: Optional[str] = "n/a"
@@ -75,6 +77,10 @@ class OverrideRequest(BaseModel):
     carton_damage: Optional[str] = None
     unit_damage: Optional[str] = None
     quality_flags: Optional[str] = None
+
+class ReinspectRequest(BaseModel):
+    photo_refs: List[str] = []
+    notes: Optional[str] = None
 
 # 1. Health Check
 @app.get("/api/health")
@@ -120,9 +126,10 @@ def get_record(record_id: str, x_org_id: Optional[str] = Header(None, alias="X-O
     conn.close()
 
     record["audit_overrides"] = overrides
+    record["attempts"] = get_attempts_by_record(record_id, tenant_org)
     return record
 
-# 4. Run Batch Inspection API (Single-pass batching Rule 2 + Fail open Rule 3)
+# 4. Run Batch Inspection API (Single-pass batching Rule 2 + Fail open Rule 3 + shipment_id Priority 1)
 @app.post("/api/inspect")
 def run_inspection(req: InspectionRequest, x_org_id: Optional[str] = Header(None, alias="X-Org-ID"), org_id: Optional[str] = Query(None)):
     tenant_org = x_org_id or org_id or "org_demo_alpha"
@@ -139,7 +146,8 @@ def run_inspection(req: InspectionRequest, x_org_id: Optional[str] = Header(None
         unit_id=req.unit_id,
         po_line_spec=spec_data,
         captured_images=photos,
-        simling_failure=req.simulate_fail_open
+        simling_failure=req.simulate_fail_open,
+        shipment_id=req.shipment_id
     )
 
     # Save generated record to DB
@@ -149,15 +157,15 @@ def run_inspection(req: InspectionRequest, x_org_id: Optional[str] = Header(None
     
     cursor.execute("""
     INSERT OR REPLACE INTO receiving_records (
-        record_id, unit_id, org_id, po_number, po_line, supplier, sku, asin,
+        record_id, unit_id, shipment_id, org_id, po_number, po_line, supplier, sku, asin,
         product_title, spec_colour, spec_variant, spec_components,
         cartons_ordered, cartons_received, units_per_carton_ordered, units_per_carton_counted,
         qty_ordered, qty_received, identity_match, carton_damage, unit_damage,
         quality_flags, photo_refs, operator_id, captured_at, overall_verdict,
         agent_confidence, status, evidence_data
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        record_id, result["unit_id"], tenant_org, req.po_number, req.po_line,
+        record_id, result["unit_id"], req.shipment_id, tenant_org, req.po_number, req.po_line,
         req.supplier, req.sku, req.asin, req.product_title,
         req.spec_colour, req.spec_variant, req.spec_components,
         result["cartons_ordered"], result["cartons_received"],
@@ -171,7 +179,27 @@ def run_inspection(req: InspectionRequest, x_org_id: Optional[str] = Header(None
     conn.commit()
     conn.close()
 
+    # Record Attempt 1 into inspection_attempts (Priority 2: Auditable Attempt History)
+    record_inspection_attempt(
+        record_id=record_id,
+        org_id=tenant_org,
+        unit_id=result["unit_id"],
+        shipment_id=req.shipment_id,
+        overall_verdict=result["overall_verdict"],
+        agent_confidence=result["agent_confidence"],
+        status=result["status"],
+        execution_mode=result["execution_mode"],
+        ai_provider=result.get("ai_provider"),
+        decision_rationale=result.get("decision_rationale") or (result.get("structured_evidence") or {}).get("decision_rationale", ""),
+        evidence_data=result["evidence_data"],
+        photo_refs=";".join(photos),
+        captured_at=result["captured_at"]
+    )
+
     result["record_id"] = record_id
+    result["shipment_id"] = req.shipment_id
+    result["photo_refs"] = ";".join(photos)
+    result["attempts"] = get_attempts_by_record(record_id, tenant_org)
     return result
 
 # 5. Operator Override Endpoint (Engineering Rule: Overrides are data)
@@ -200,7 +228,7 @@ def override_record(
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
 
-# 5b. Retry Inspection Endpoint (Fail-open recovery)
+# 5b. Retry Inspection Endpoint (Priority 2: Fail-open recovery with auditable attempt preservation)
 @app.post("/api/records/{record_id}/retry")
 def retry_inspection(
     record_id: str,
@@ -212,10 +240,30 @@ def retry_inspection(
     if not record:
         raise HTTPException(status_code=404, detail=f"Record '{record_id}' not found for organization '{tenant_org}'. Tenancy RLS enforced.")
     
+    # Priority 2: Ensure Attempt 1 is recorded before retry if it was not already in attempts table
+    existing_attempts = get_attempts_by_record(record_id, tenant_org)
+    if not existing_attempts:
+        record_inspection_attempt(
+            record_id=record_id,
+            org_id=tenant_org,
+            unit_id=record["unit_id"],
+            shipment_id=record.get("shipment_id"),
+            overall_verdict=record.get("overall_verdict", "PENDING_REVIEW"),
+            agent_confidence=float(record.get("agent_confidence", 0.0)),
+            status=record.get("status", "pending_review"),
+            execution_mode="FAIL_OPEN_CIRCUIT_BREAKER" if record.get("status") == "pending_review" else "ORIGINAL_ATTEMPT",
+            ai_provider="Original Execution Attempt",
+            decision_rationale="Initial inspection failure preserved in audit history.",
+            evidence_data=record.get("evidence_data"),
+            photo_refs=record.get("photo_refs", ""),
+            captured_at=record.get("captured_at")
+        )
+
     agent = ReceivingManagerAgent()
     spec_data = {
         "po_number": record.get("po_number", "PO-RETRY"),
         "po_line": record.get("po_line", 1),
+        "shipment_id": record.get("shipment_id"),
         "supplier": record.get("supplier", "Supplier"),
         "sku": record.get("sku", "SKU"),
         "asin": record.get("asin", "ASIN"),
@@ -236,23 +284,235 @@ def retry_inspection(
         unit_id=record["unit_id"],
         po_line_spec=spec_data,
         captured_images=photo_refs,
-        simling_failure=False
+        simling_failure=False,
+        shipment_id=record.get("shipment_id")
     )
+
+    # Record Attempt 2 (or N+1) in inspection_attempts (Priority 2)
+    record_inspection_attempt(
+        record_id=record_id,
+        org_id=tenant_org,
+        unit_id=record["unit_id"],
+        shipment_id=record.get("shipment_id"),
+        overall_verdict=result["overall_verdict"],
+        agent_confidence=result["agent_confidence"],
+        status=result["status"],
+        execution_mode=result["execution_mode"],
+        ai_provider=result.get("ai_provider"),
+        decision_rationale=result.get("decision_rationale") or (result.get("structured_evidence") or {}).get("decision_rationale", ""),
+        evidence_data=result["evidence_data"],
+        photo_refs=";".join(photo_refs),
+        captured_at=result["captured_at"]
+    )
+
+    # Update active record view in receiving_records
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
     UPDATE receiving_records SET
         overall_verdict = ?,
         agent_confidence = ?,
+        identity_match = ?,
+        carton_damage = ?,
+        unit_damage = ?,
+        quality_flags = ?,
         status = 'processed',
         evidence_data = ?
     WHERE record_id = ? AND org_id = ?
-    """, (result["overall_verdict"], result["agent_confidence"], result["evidence_data"], record_id, tenant_org))
+    """, (
+        result["overall_verdict"],
+        result["agent_confidence"],
+        result["identity_match"],
+        result["carton_damage"],
+        result["unit_damage"],
+        result["quality_flags"],
+        result["evidence_data"],
+        record_id,
+        tenant_org
+    ))
     conn.commit()
     conn.close()
+
     result["record_id"] = record_id
+    result["shipment_id"] = record.get("shipment_id")
     result["retry_success"] = True
+    result["attempts"] = get_attempts_by_record(record_id, tenant_org)
     return result
+
+# 5c. Additional Evidence & Reinspection Endpoint (Priority 7)
+@app.post("/api/records/{record_id}/reinspect")
+def reinspect_with_additional_evidence(
+    record_id: str,
+    req: ReinspectRequest,
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+    record = get_record_by_id_scoped(record_id, tenant_org)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Record '{record_id}' not found for organization '{tenant_org}'. Tenancy RLS enforced.")
+
+    # Preserve Attempt 1 if not yet recorded
+    existing_attempts = get_attempts_by_record(record_id, tenant_org)
+    if not existing_attempts:
+        record_inspection_attempt(
+            record_id=record_id,
+            org_id=tenant_org,
+            unit_id=record["unit_id"],
+            shipment_id=record.get("shipment_id"),
+            overall_verdict=record.get("overall_verdict", "UNCERTAIN"),
+            agent_confidence=float(record.get("agent_confidence", 0.0)),
+            status=record.get("status", "processed"),
+            execution_mode="INITIAL_ATTEMPT",
+            ai_provider="Visual Inspection Initial Attempt",
+            decision_rationale=f"Initial inspection prior to additional evidence submission: {record.get('overall_verdict')}",
+            evidence_data=record.get("evidence_data"),
+            photo_refs=record.get("photo_refs", ""),
+            captured_at=record.get("captured_at")
+        )
+
+    # Combine existing photo refs with newly submitted photo refs
+    existing_photos = [p.strip() for p in record.get("photo_refs", "").split(";") if p.strip()]
+    combined_photos = list(dict.fromkeys(existing_photos + [p.strip() for p in req.photo_refs if p.strip()]))
+    if not combined_photos:
+        combined_photos = ["fixtures/receiving/default_pallet.jpg"]
+
+    agent = ReceivingManagerAgent()
+    spec_data = {
+        "po_number": record.get("po_number", "PO-REINSPECT"),
+        "po_line": record.get("po_line", 1),
+        "shipment_id": record.get("shipment_id"),
+        "supplier": record.get("supplier", "Supplier"),
+        "sku": record.get("sku", "SKU"),
+        "asin": record.get("asin", "ASIN"),
+        "product_title": record.get("product_title", "Product"),
+        "spec_colour": record.get("spec_colour", ""),
+        "spec_variant": record.get("spec_variant", ""),
+        "spec_components": record.get("spec_components", ""),
+        "cartons_ordered": record.get("cartons_ordered", 1),
+        "cartons_received": record.get("cartons_received", 1),
+        "units_per_carton_ordered": record.get("units_per_carton_ordered", 12),
+        "units_per_carton_counted": record.get("units_per_carton_counted", 12),
+        "qty_ordered": record.get("qty_ordered", 12),
+        "qty_received": record.get("qty_received", 12),
+    }
+
+    result = agent.run_batch_receiving_inspection(
+        org_id=tenant_org,
+        unit_id=record["unit_id"],
+        po_line_spec=spec_data,
+        captured_images=combined_photos,
+        simling_failure=False,
+        shipment_id=record.get("shipment_id")
+    )
+
+    # Record Attempt N+1 in inspection_attempts
+    reinspect_rationale = (
+        f"Additional evidence provided ({len(req.photo_refs)} new photo(s)). "
+        + (result.get("decision_rationale") or "")
+    ).strip()
+
+    record_inspection_attempt(
+        record_id=record_id,
+        org_id=tenant_org,
+        unit_id=record["unit_id"],
+        shipment_id=record.get("shipment_id"),
+        overall_verdict=result["overall_verdict"],
+        agent_confidence=result["agent_confidence"],
+        status=result["status"],
+        execution_mode=result["execution_mode"],
+        ai_provider=result.get("ai_provider"),
+        decision_rationale=reinspect_rationale,
+        evidence_data=result["evidence_data"],
+        photo_refs=";".join(combined_photos),
+        captured_at=result["captured_at"]
+    )
+
+    # Update receiving_records with new evidence and photo refs
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE receiving_records SET
+        overall_verdict = ?,
+        agent_confidence = ?,
+        identity_match = ?,
+        carton_damage = ?,
+        unit_damage = ?,
+        quality_flags = ?,
+        photo_refs = ?,
+        status = 'processed',
+        evidence_data = ?
+    WHERE record_id = ? AND org_id = ?
+    """, (
+        result["overall_verdict"], result["agent_confidence"],
+        result["identity_match"], result["carton_damage"], result["unit_damage"],
+        result["quality_flags"], ";".join(combined_photos),
+        result["evidence_data"], record_id, tenant_org
+    ))
+    conn.commit()
+    conn.close()
+
+    result["record_id"] = record_id
+    result["shipment_id"] = record.get("shipment_id")
+    result["reinspect_success"] = True
+    result["attempts"] = get_attempts_by_record(record_id, tenant_org)
+    return result
+
+# 5d. Get Record Attempts Audit Trail (Priority 2)
+@app.get("/api/records/{record_id}/attempts")
+def get_record_attempts(
+    record_id: str,
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+    record = get_record_by_id_scoped(record_id, tenant_org)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Record '{record_id}' not found for organization '{tenant_org}'. Tenancy RLS enforced.")
+    attempts = get_attempts_by_record(record_id, tenant_org)
+    return {
+        "record_id": record_id,
+        "tenant_org": tenant_org,
+        "total_attempts": len(attempts),
+        "attempts": attempts
+    }
+
+# 5e. Live Operational Metrics & Uncertain Rate Endpoint (Priority 6)
+@app.get("/api/metrics/live")
+def get_live_operational_metrics(
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+    records = get_records_by_org(tenant_org)
+    
+    total = len(records)
+    pass_count = sum(1 for r in records if r.get("overall_verdict") == "PASS")
+    fail_count = sum(1 for r in records if r.get("overall_verdict") == "FAIL")
+    uncertain_count = sum(1 for r in records if r.get("overall_verdict") == "UNCERTAIN")
+    pending_review_count = sum(1 for r in records if r.get("overall_verdict") == "PENDING_REVIEW" or r.get("status") == "pending_review")
+    
+    # Priority 6 Explicit Definition:
+    # uncertain_rate = UNCERTAIN inspections / total completed inspections
+    # PENDING_REVIEW is excluded from the completed inspections denominator (awaiting retry/recovery)
+    completed_inspections = pass_count + fail_count + uncertain_count
+    uncertain_rate = round(uncertain_count / completed_inspections, 4) if completed_inspections > 0 else 0.0
+
+    return {
+        "tenant_org": tenant_org,
+        "metric_type": "Live Operational Metrics",
+        "total_inspections": total,
+        "completed_inspections": completed_inspections,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "uncertain_count": uncertain_count,
+        "pending_review_count": pending_review_count,
+        "uncertain_rate": uncertain_rate,
+        "uncertain_rate_pct": round(uncertain_rate * 100, 2),
+        "formula": "uncertain_rate = UNCERTAIN inspections / total completed inspections",
+        "denominator_policy": "PENDING_REVIEW is excluded from denominator (represents interrupted system execution awaiting retry rather than completed visual decision)",
+        "source": "live_receiving_records_db"
+    }
 
 # 6. Evaluation Runner Endpoint
 @app.get("/api/eval/run")
@@ -390,3 +650,30 @@ async def upload_photo(
         "photo_url": f"/api/images/{tenant_org}/{safe_name}",
         "relative_path": f"fixtures/{tenant_org}/{safe_name}"
     }
+
+# 14. Purchase Orders Endpoint (Tenant Scoped Inbound PO Directory)
+@app.get("/api/purchase-orders")
+def get_purchase_orders(
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT DISTINCT po_number, po_line, shipment_id, supplier, sku, asin, product_title,
+               spec_colour, spec_variant, spec_components, cartons_ordered,
+               units_per_carton_ordered, qty_ordered
+        FROM receiving_records
+        WHERE org_id = ?
+        ORDER BY po_number ASC
+    """, (tenant_org,))
+    db_pos = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    return {
+        "tenant_org": tenant_org,
+        "count": len(db_pos),
+        "purchase_orders": db_pos
+    }
+
