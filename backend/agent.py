@@ -19,6 +19,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, ValidationError
 
 from backend.rules_engine import evaluate_authoritative_compliance
+from backend.candidate_provider import candidate_provider
 
 try:
     from PIL import Image, ImageStat
@@ -59,6 +60,7 @@ class QuantityEvidence(BaseModel):
 class InspectionResultSchema(BaseModel):
     schema_version: str = "1.0.0"
     unit_id: str
+    shipment_id: Optional[str] = None
     org_id: str
     model_name: str
     model_version: str
@@ -81,6 +83,7 @@ class InspectionResultSchema(BaseModel):
     quantity_breakdown: QuantityEvidence
     individual_checks: List[CheckEvidenceItem]
     authoritative_channel_checks: List[Dict[str, Any]]
+    candidate_skus: Optional[List[Dict[str, Any]]] = None
 
 
 def safe_int(val: Any, default: int = 1) -> int:
@@ -115,15 +118,20 @@ class ReceivingManagerAgent:
         unit_id: str,
         po_line_spec: Dict[str, Any],
         captured_images: List[str],
-        simling_failure: bool = False
+        simling_failure: bool = False,
+        shipment_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Executes single-pass batch receiving inspection.
         Batches all visual reasoning checks into a single unified pass.
         Computes deterministic arithmetic for carton and unit counts.
+        Supports shipment_id end-to-end and candidate SKU discrimination.
         """
         start_time = time.time()
         captured_at = datetime.utcnow().isoformat()
+
+        if shipment_id is None and po_line_spec and isinstance(po_line_spec, dict):
+            shipment_id = po_line_spec.get("shipment_id")
 
         # Engineering Rule 3: Fail-Open Simulation / Timeout Circuit Breaker
         if simling_failure:
@@ -133,7 +141,8 @@ class ReceivingManagerAgent:
                 po_line_spec=po_line_spec,
                 captured_images=captured_images,
                 captured_at=captured_at,
-                reason="Vision pipeline timeout / model service unavailability (Fail-Open active)"
+                reason="Vision pipeline timeout / model service unavailability (Fail-Open active)",
+                shipment_id=shipment_id
             )
 
         # Real Gemini Multimodal AI Branch if API key is configured
@@ -145,7 +154,8 @@ class ReceivingManagerAgent:
                     po_line_spec=po_line_spec,
                     captured_images=captured_images,
                     captured_at=captured_at,
-                    start_time=start_time
+                    start_time=start_time,
+                    shipment_id=shipment_id
                 )
             except Exception as gemini_err:
                 # Engineering Rule 3: If real AI fails, trigger fail-open PENDING_REVIEW
@@ -156,7 +166,8 @@ class ReceivingManagerAgent:
                     po_line_spec=po_line_spec,
                     captured_images=captured_images,
                     captured_at=captured_at,
-                    reason=f"Real Gemini Vision API error: {str(gemini_err)} (Fail-open fallback active)"
+                    reason=f"Real Gemini Vision API error: {str(gemini_err)} (Fail-open fallback active)",
+                    shipment_id=shipment_id
                 )
 
         try:
@@ -249,9 +260,11 @@ class ReceivingManagerAgent:
                 "total_qty_received": qty_breakdown.inferred_total_units,
                 "photo_refs": captured_images
             }
+            candidate_skus = candidate_provider.get_candidate_set(po_line_spec.get("sku", "SKU-UNKNOWN"), po_line_spec)
             what_expected_data = {
                 "po_number": po_line_spec.get("po_number", "PO-7000"),
                 "po_line": po_line_spec.get("po_line", 1),
+                "shipment_id": shipment_id,
                 "supplier": po_line_spec.get("supplier", "Supplier Standard"),
                 "sku": po_line_spec.get("sku", "SKU-UNKNOWN"),
                 "asin": po_line_spec.get("asin", "B0DUMMY000"),
@@ -269,6 +282,7 @@ class ReceivingManagerAgent:
             structured_inspection = InspectionResultSchema(
                 schema_version="1.0.0",
                 unit_id=unit_id,
+                shipment_id=shipment_id,
                 org_id=org_id,
                 model_name=self.model_name,
                 model_version=self.model_version,
@@ -290,7 +304,8 @@ class ReceivingManagerAgent:
                 checks=legacy_checks,
                 quantity_breakdown=qty_breakdown,
                 individual_checks=all_checks,
-                authoritative_channel_checks=channel_rules_eval
+                authoritative_channel_checks=channel_rules_eval,
+                candidate_skus=candidate_skus
             )
 
             dump_data = structured_inspection.model_dump() if hasattr(structured_inspection, "model_dump") else structured_inspection.dict()
@@ -298,6 +313,8 @@ class ReceivingManagerAgent:
             # Legacy and API Compatible Payload
             return {
                 "unit_id": unit_id,
+                "shipment_id": shipment_id,
+                "candidate_skus": candidate_skus,
                 "org_id": org_id,
                 "captured_at": captured_at,
                 "batch_execution_time_ms": elapsed_ms,
@@ -441,6 +458,20 @@ class ReceivingManagerAgent:
                 confidence=0.96,
                 evidence_source="Visual Barcode & Label OCR",
                 evidence_description=f"Label barcode decoded as '{observed_sku}', contradicting PO line SKU '{expected_sku}'.",
+                image_identifier=image_id,
+                bounding_box={"x": 0.25, "y": 0.38, "w": 0.20, "h": 0.25},
+                timestamp=ts
+            )
+
+        if override_match == "uncertain":
+            return CheckEvidenceItem(
+                check_name="Product/SKU Identity",
+                verdict="UNCERTAIN",
+                expected_value=expected_sku,
+                observed_value="UNCERTAIN / UNREADABLE",
+                confidence=0.40,
+                evidence_source="Visual Barcode & Label OCR",
+                evidence_description="Image resolution, occlusion, or glare prevents reliable barcode / SKU verification.",
                 image_identifier=image_id,
                 bounding_box={"x": 0.25, "y": 0.38, "w": 0.20, "h": 0.25},
                 timestamp=ts
@@ -676,11 +707,13 @@ class ReceivingManagerAgent:
         po_line_spec: Dict[str, Any],
         captured_images: List[str],
         captured_at: str,
-        start_time: float
+        start_time: float,
+        shipment_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Executes single-pass multimodal visual verification against Google Gemini Vision API.
         Used ONLY when GEMINI_API_KEY is configured.
+        Supports multi-candidate SKU discrimination (Priority 4 & 5) and optional bounding boxes (Priority 8).
         """
         import google.generativeai as genai
 
@@ -695,6 +728,13 @@ class ReceivingManagerAgent:
         cartons_ord = safe_int(po_line_spec.get("cartons_ordered"), 1)
         units_per_c_ord = safe_int(po_line_spec.get("units_per_carton_ordered"), 12)
         qty_ord = safe_int(po_line_spec.get("qty_ordered"), cartons_ord * units_per_c_ord)
+
+        # Retrieve catalogue candidate SKU set (expected SKU + look-alike alternatives)
+        candidates = candidate_provider.get_candidate_set(po_sku, po_line_spec)
+        candidates_formatted = "\n".join([
+            f"  - SKU: {c['sku']} | Title: {c['product_title']} | Variant: {c.get('spec_variant', 'n/a')} | Is Expected PO SKU: {c.get('is_expected', False)}"
+            for c in candidates
+        ])
 
         pil_images = []
         if PIL_AVAILABLE:
@@ -717,8 +757,16 @@ Evaluate the attached image(s) against this Purchase Order line specification:
 - Units Per Carton Ordered: {units_per_c_ord}
 - Expected Total Quantity: {qty_ord} units
 
+Catalogue Candidate SKUs for visual discrimination:
+{candidates_formatted}
+
 Conduct unified single-pass verification across all 5 receiving checks:
-1. Product / SKU Identity: Does the packaging label or barcode match the expected SKU? (yes/no/uncertain)
+1. Product / SKU Identity: You must examine the shipping label, packaging text, or barcode and discriminate among the candidate SKUs above.
+   - observed_sku: which SKU from the candidates (or label) is visually observed? (string or null)
+   - candidate_sku: the closest candidate SKU evaluated (string or null)
+   - identity_match: "yes" if observed clearly matches expected SKU {po_sku}; "no" if observed matches another candidate or distinct SKU; "uncertain" if label is unreadable, blurry, occluded, or evidence is insufficient.
+   - identity_confidence: float between 0.0 and 1.0
+   - identity_evidence: text description of label, markings, or visual cues seen.
 2. Quantity Verification: How many cartons are observed? How many units per carton? (If carton is sealed, report carton count and infer total).
 3. Carton Physical Integrity: Check for crushing (>10% volume), water/moisture intrusion, tears, or punctures. (none/crushing/water/tears/uncertain)
 4. Unit Physical Integrity: Are inner units intact? (none/crushing/water/tears/uncertain)
@@ -726,10 +774,15 @@ Conduct unified single-pass verification across all 5 receiving checks:
 6. Overall Verdict: PASS (all match PO, no damage), FAIL (any discrepancy/defect), or UNCERTAIN (blurry image, occluded barcode, unreadable text).
 7. Decision Rationale: Concise, professional dock log explaining the findings.
 8. If UNCERTAIN: Provide uncertain_explanation and recommended_next_evidence.
+9. Optional Bounding Box: If packaging or damage or label is localized, provide normalized bounding box {{"x": float, "y": float, "width": float, "height": float}} (between 0.0 and 1.0) or null.
 
 Return STRICT JSON ONLY matching this structure:
 {{
+  "observed_sku": "<string or null>",
+  "candidate_sku": "<string or null>",
   "identity_match": "yes" | "no" | "uncertain",
+  "identity_confidence": <float between 0.0 and 1.0>,
+  "identity_evidence": "<string>",
   "cartons_observed": <int>,
   "units_per_carton_observed": <int>,
   "carton_damage": "none" | "crushing" | "water" | "tears" | "uncertain",
@@ -739,7 +792,8 @@ Return STRICT JSON ONLY matching this structure:
   "agent_confidence": <float between 0.0 and 1.0>,
   "decision_rationale": "<string>",
   "uncertain_explanation": "<string or null>",
-  "recommended_next_evidence": "<string or null>"
+  "recommended_next_evidence": "<string or null>",
+  "bounding_box": {{"x": <float>, "y": <float>, "width": <float>, "height": <float>}} | null
 }}
 """
         contents = [prompt] + pil_images
@@ -773,16 +827,33 @@ Return STRICT JSON ONLY matching this structure:
             quantity_verdict=qty_verdict
         )
 
+        # Parse normalized bounding box if provided by Gemini (Priority 8)
+        raw_box = data.get("bounding_box")
+        box_dict = None
+        if isinstance(raw_box, dict) and all(k in raw_box for k in ["x", "y", "width", "height"]):
+            try:
+                box_dict = {
+                    "x": float(raw_box["x"]),
+                    "y": float(raw_box["y"]),
+                    "width": float(raw_box["width"]),
+                    "height": float(raw_box["height"])
+                }
+            except (ValueError, TypeError):
+                box_dict = None
+
+        observed_identity = data.get("observed_sku") or (po_sku if data.get("identity_match") == "yes" else ("UNREADABLE_OR_OCCLUDED" if data.get("identity_match") == "uncertain" else "MISMATCH"))
+
         all_checks = [
             CheckEvidenceItem(
                 check_name="Product/SKU Identity",
                 verdict="PASS" if data.get("identity_match") == "yes" else ("FAIL" if data.get("identity_match") == "no" else "UNCERTAIN"),
                 expected_value=po_sku,
-                observed_value=po_sku if data.get("identity_match") == "yes" else "MISMATCH_OR_UNREADABLE",
-                confidence=float(data.get("agent_confidence", 0.9)),
+                observed_value=observed_identity,
+                confidence=float(data.get("identity_confidence", data.get("agent_confidence", 0.9))),
                 evidence_source="Google Gemini Multimodal Vision API",
-                evidence_description="Gemini analyzed shipping label, barcode, and product title.",
+                evidence_description=data.get("identity_evidence", "Gemini analyzed shipping label, barcode, and catalogue candidate set."),
                 image_identifier=primary_image,
+                bounding_box=box_dict,
                 timestamp=captured_at
             ),
             CheckEvidenceItem(
@@ -805,6 +876,7 @@ Return STRICT JSON ONLY matching this structure:
                 evidence_source="Google Gemini Multimodal Vision API",
                 evidence_description=f"Gemini assessed carton damage as: {data.get('carton_damage')}.",
                 image_identifier=primary_image,
+                bounding_box=box_dict if data.get("carton_damage") != "none" else None,
                 timestamp=captured_at
             ),
             CheckEvidenceItem(
@@ -816,6 +888,7 @@ Return STRICT JSON ONLY matching this structure:
                 evidence_source="Google Gemini Multimodal Vision API",
                 evidence_description=f"Gemini assessed unit damage as: {data.get('unit_damage')}.",
                 image_identifier=primary_image,
+                bounding_box=box_dict if data.get("unit_damage") != "none" else None,
                 timestamp=captured_at
             ),
             CheckEvidenceItem(
@@ -852,6 +925,7 @@ Return STRICT JSON ONLY matching this structure:
         structured = InspectionResultSchema(
             schema_version="1.0.0",
             unit_id=unit_id,
+            shipment_id=shipment_id,
             org_id=org_id,
             model_name=self.model_name,
             model_version=self.model_version,
@@ -877,6 +951,7 @@ Return STRICT JSON ONLY matching this structure:
             what_expected={
                 "po_number": po_line_spec.get("po_number", "PO-7000"),
                 "po_line": po_line_spec.get("po_line", 1),
+                "shipment_id": shipment_id,
                 "supplier": po_line_spec.get("supplier", "Supplier Standard"),
                 "sku": po_sku,
                 "asin": po_line_spec.get("asin", "B0DUMMY000"),
@@ -888,12 +963,15 @@ Return STRICT JSON ONLY matching this structure:
             checks=legacy_checks,
             quantity_breakdown=qty_breakdown,
             individual_checks=all_checks,
-            authoritative_channel_checks=channel_rules_eval
+            authoritative_channel_checks=channel_rules_eval,
+            candidate_skus=candidates
         )
         dump_data = structured.model_dump() if hasattr(structured, "model_dump") else structured.dict()
 
         return {
             "unit_id": unit_id,
+            "shipment_id": shipment_id,
+            "candidate_skus": candidates,
             "org_id": org_id,
             "captured_at": captured_at,
             "batch_execution_time_ms": elapsed_ms,
@@ -928,10 +1006,14 @@ Return STRICT JSON ONLY matching this structure:
 
     def _build_fail_open_response(
         self, org_id: str, unit_id: str, po_line_spec: Dict[str, Any],
-        captured_images: List[str], captured_at: str, reason: str
+        captured_images: List[str], captured_at: str, reason: str,
+        shipment_id: Optional[str] = None
     ) -> Dict[str, Any]:
         if po_line_spec is None or not isinstance(po_line_spec, dict):
             po_line_spec = {}
+
+        if shipment_id is None:
+            shipment_id = po_line_spec.get("shipment_id")
 
         cartons_ord = safe_int(po_line_spec.get("cartons_ordered"), 1)
         cartons_rec = safe_int(po_line_spec.get("cartons_received"), cartons_ord)
@@ -977,6 +1059,7 @@ Return STRICT JSON ONLY matching this structure:
         what_expected_data = {
             "po_number": po_line_spec.get("po_number", "PO-7000"),
             "po_line": po_line_spec.get("po_line", 1),
+            "shipment_id": shipment_id,
             "supplier": po_line_spec.get("supplier", "Supplier Standard"),
             "sku": po_line_spec.get("sku", "SKU-UNKNOWN"),
             "asin": po_line_spec.get("asin", "B0DUMMY000"),
@@ -993,9 +1076,14 @@ Return STRICT JSON ONLY matching this structure:
             }
         ]
 
+        # Preserve execution mode fidelity: Never silently switch REAL_AI to DEMO mode
+        exec_mode = "REAL_AI_MULTIMODAL" if self.is_real_ai else self.execution_mode
+        ai_prov = "Google Gemini Multimodal Vision API (Fail-Open Active)" if self.is_real_ai else self.ai_provider
+
         structured = InspectionResultSchema(
             schema_version="1.0.0",
             unit_id=unit_id,
+            shipment_id=shipment_id,
             org_id=org_id,
             model_name=self.model_name,
             model_version=self.model_version,
@@ -1009,9 +1097,9 @@ Return STRICT JSON ONLY matching this structure:
             decision_rationale=f"FAIL-OPEN ACTIVE: {reason}",
             uncertain_explanation="AI pipeline service latency exceeded threshold. Saved safely for dock continuity.",
             recommended_next_evidence="Operator may perform manual override or trigger Retry Inspection once connectivity stabilizes.",
-            execution_mode=self.execution_mode,
+            execution_mode=exec_mode,
             is_real_ai=self.is_real_ai,
-            ai_provider=self.ai_provider,
+            ai_provider=ai_prov,
             what_received=what_received_data,
             what_expected=what_expected_data,
             checks=legacy_checks,
@@ -1024,15 +1112,16 @@ Return STRICT JSON ONLY matching this structure:
 
         return {
             "unit_id": unit_id,
+            "shipment_id": shipment_id,
             "org_id": org_id,
             "captured_at": captured_at,
             "batch_execution_time_ms": 0.0,
             "batch_single_pass": True,
             "model_name": self.model_name,
             "model_version": self.model_version,
-            "execution_mode": self.execution_mode,
+            "execution_mode": exec_mode,
             "is_real_ai": self.is_real_ai,
-            "ai_provider": self.ai_provider,
+            "ai_provider": ai_prov,
             "identity_match": "uncertain",
             "cartons_ordered": cartons_ord,
             "cartons_received": cartons_rec,
