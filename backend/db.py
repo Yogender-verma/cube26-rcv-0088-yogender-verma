@@ -22,6 +22,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS receiving_records (
         record_id TEXT PRIMARY KEY,
         unit_id TEXT NOT NULL,
+        shipment_id TEXT DEFAULT NULL,
         org_id TEXT NOT NULL,
         po_number TEXT NOT NULL,
         po_line INTEGER NOT NULL,
@@ -51,6 +52,12 @@ def init_db():
         evidence_data TEXT
     );
     """)
+
+    # Migration for existing databases that lack shipment_id column
+    cursor.execute("PRAGMA table_info(receiving_records);")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "shipment_id" not in columns:
+        cursor.execute("ALTER TABLE receiving_records ADD COLUMN shipment_id TEXT DEFAULT NULL;")
     
     # Table for operator overrides (Engineering Rule: Overrides are data)
     cursor.execute("""
@@ -71,6 +78,29 @@ def init_db():
         operator_id TEXT NOT NULL,
         override_reason TEXT NOT NULL,
         overridden_at TEXT NOT NULL,
+        FOREIGN KEY (record_id) REFERENCES receiving_records(record_id)
+    );
+    """)
+
+    # Table for inspection attempts (Priority 2: Auditable Retry History)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS inspection_attempts (
+        attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        org_id TEXT NOT NULL,
+        unit_id TEXT NOT NULL,
+        shipment_id TEXT,
+        captured_at TEXT NOT NULL,
+        overall_verdict TEXT NOT NULL,
+        agent_confidence REAL DEFAULT 0.0,
+        status TEXT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        ai_provider TEXT,
+        decision_rationale TEXT,
+        evidence_data TEXT,
+        photo_refs TEXT,
+        created_at TEXT NOT NULL,
         FOREIGN KEY (record_id) REFERENCES receiving_records(record_id)
     );
     """)
@@ -181,15 +211,15 @@ def seed_db_from_csv(cursor):
 
             cursor.execute("""
             INSERT OR REPLACE INTO receiving_records (
-                record_id, unit_id, org_id, po_number, po_line, supplier, sku, asin,
+                record_id, unit_id, shipment_id, org_id, po_number, po_line, supplier, sku, asin,
                 product_title, spec_colour, spec_variant, spec_components,
                 cartons_ordered, cartons_received, units_per_carton_ordered, units_per_carton_counted,
                 qty_ordered, qty_received, identity_match, carton_damage, unit_damage,
                 quality_flags, photo_refs, operator_id, captured_at, overall_verdict,
                 agent_confidence, status, evidence_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                row["record_id"], row["unit_id"], row["org_id"], row["po_number"], int(row["po_line"]),
+                row["record_id"], row["unit_id"], row.get("shipment_id") or None, row["org_id"], row["po_number"], int(row["po_line"]),
                 row["supplier"], row["sku"], row["asin"], row["product_title"],
                 row.get("spec_colour", ""), row.get("spec_variant", ""), row.get("spec_components", ""),
                 int(row.get("cartons_ordered", 0)), int(row.get("cartons_received", 0)),
@@ -298,6 +328,73 @@ def save_operator_override(record_id: str, org_id: str, new_verdicts: Dict[str, 
     conn.close()
 
     return {"status": "success", "override_recorded": True, "new_overall_verdict": new_overall}
+    
+def record_inspection_attempt(
+    record_id: str,
+    org_id: str,
+    unit_id: str,
+    shipment_id: Optional[str],
+    overall_verdict: str,
+    agent_confidence: float,
+    status: str,
+    execution_mode: str,
+    ai_provider: Optional[str] = None,
+    decision_rationale: Optional[str] = None,
+    evidence_data: Optional[str] = None,
+    photo_refs: Optional[str] = None,
+    captured_at: Optional[str] = None
+) -> int:
+    """
+    Appends an immutable inspection attempt record.
+    Preserves original failures, API timeouts, and UNCERTAIN verdicts for auditability (Priority 2).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Determine next attempt number for this record within this tenant org
+    cursor.execute(
+        "SELECT COUNT(*) FROM inspection_attempts WHERE record_id = ? AND org_id = ?",
+        (record_id, org_id)
+    )
+    count = cursor.fetchone()[0]
+    attempt_num = count + 1
+    
+    now_str = datetime.utcnow().isoformat()
+    cap_str = captured_at or now_str
+    
+    cursor.execute("""
+    INSERT INTO inspection_attempts (
+        record_id, attempt_number, org_id, unit_id, shipment_id,
+        captured_at, overall_verdict, agent_confidence, status,
+        execution_mode, ai_provider, decision_rationale, evidence_data,
+        photo_refs, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        record_id, attempt_num, org_id, unit_id, shipment_id,
+        cap_str, overall_verdict, agent_confidence, status,
+        execution_mode, ai_provider, decision_rationale, evidence_data,
+        photo_refs, now_str
+    ))
+    conn.commit()
+    attempt_id = cursor.lastrowid
+    conn.close()
+    return attempt_id
+
+def get_attempts_by_record(record_id: str, org_id: str) -> List[Dict[str, Any]]:
+    """
+    Returns all inspection attempts for a record, strictly scoped by tenant org_id.
+    Prevents cross-tenant attempt leaks.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT * FROM inspection_attempts
+    WHERE record_id = ? AND org_id = ?
+    ORDER BY attempt_number ASC
+    """, (record_id, org_id))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
 
 if __name__ == "__main__":
     init_db()
