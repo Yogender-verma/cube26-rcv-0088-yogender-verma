@@ -355,9 +355,8 @@ def test_14_cross_pod_contract_contains_shipment_id():
     contract = contract_res.json()
     assert "subject" in contract
     assert contract["subject"]["shipment_id"] == "SHIP-CONTRACT-44"
-    assert contract["subject"]["unit_id"] == "UNIT-INT-14"
-    assert contract["subject"]["po_line_reference"]["po_number"] == "PO-1014"
-    assert contract["subject"]["po_line_reference"]["po_line"] == 2
+    assert contract["subject"]["order_id"] == "PO-1014"
+    assert contract["subject"]["po_line_id"] == "2"
 
 # 15. cross-pod check-key names
 def test_15_cross_pod_check_key_names():
@@ -388,8 +387,11 @@ def test_15_cross_pod_check_key_names():
         "unit_undamaged",
         "variant_correct"
     }
-    checks = contract.get("checks", {})
-    found_keys = set(checks.keys())
+    checks = contract.get("checks", [])
+    if isinstance(checks, list):
+        found_keys = {c.get("check_key") for c in checks}
+    else:
+        found_keys = set(checks.keys())
     for k in expected_keys:
         assert k in found_keys, f"Expected cross-pod check key '{k}' missing from contract checks: {found_keys}"
 

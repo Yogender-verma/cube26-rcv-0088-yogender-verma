@@ -87,13 +87,15 @@ def test_evidence_contract_generation_matches_schema():
     sample_rec = records[0]
     
     contract = generate_evidence_contract(sample_rec)
-    assert contract["schema_version"] == "1.0.0"
-    assert contract["stage"] == "01_RECEIVING"
-    assert contract["record_id"] == sample_rec["record_id"]
-    assert "po_line_reference" in contract
-    assert "inspection_findings" in contract
-    assert "verdict" in contract
-    assert "proof_of_receipt" in contract
+    assert contract["schema_version"] == "1.1"
+    assert contract["agent"] == "receiving"
+    assert "subject" in contract
+    assert "images" in contract
+    assert "checks" in contract
+    assert "outcome" in contract
+    assert "overrides" in contract
+    assert "status" in contract
+    assert "content_hash" in contract
 
 def test_operator_override_retains_history():
     records = get_records_by_org("org_demo_alpha")

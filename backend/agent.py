@@ -84,6 +84,7 @@ class InspectionResultSchema(BaseModel):
     individual_checks: List[CheckEvidenceItem]
     authoritative_channel_checks: List[Dict[str, Any]]
     candidate_skus: Optional[List[Dict[str, Any]]] = None
+    token_usage: Optional[Dict[str, Any]] = None
 
 
 def safe_int(val: Any, default: int = 1) -> int:
@@ -803,6 +804,17 @@ Return STRICT JSON ONLY matching this structure:
         )
         data = json.loads(response.text)
 
+        # Extract token usage metadata from Gemini response if available (Phase 3 compliance)
+        token_usage = None
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            meta = response.usage_metadata
+            token_usage = {
+                "prompt_tokens": getattr(meta, "prompt_token_count", None),
+                "candidates_tokens": getattr(meta, "candidates_token_count", None),
+                "total_tokens": getattr(meta, "total_token_count", None)
+            }
+            print(f"[ReceivingManagerAgent] Gemini token usage logged: {token_usage}")
+
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         primary_image = captured_images[0] if captured_images else "fixtures/receiving/default_pallet.jpg"
 
@@ -964,7 +976,8 @@ Return STRICT JSON ONLY matching this structure:
             quantity_breakdown=qty_breakdown,
             individual_checks=all_checks,
             authoritative_channel_checks=channel_rules_eval,
-            candidate_skus=candidates
+            candidate_skus=candidates,
+            token_usage=token_usage
         )
         dump_data = structured.model_dump() if hasattr(structured, "model_dump") else structured.dict()
 
@@ -972,6 +985,7 @@ Return STRICT JSON ONLY matching this structure:
             "unit_id": unit_id,
             "shipment_id": shipment_id,
             "candidate_skus": candidates,
+            "token_usage": token_usage,
             "org_id": org_id,
             "captured_at": captured_at,
             "batch_execution_time_ms": elapsed_ms,

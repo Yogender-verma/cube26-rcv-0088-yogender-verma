@@ -487,7 +487,20 @@ In accordance with Engineering Rule 1:
 
 ---
 
-## 10. Production Deployment Readiness
+## 10. Evidence Contract v1.1 Compliance & Architecture Notes
+
+- **Standardized Evidence Contract v1.1:** Fully implemented in `backend/contract.py` and served via `/v1/records/{id}` and `/api/contract/{id}`. Conforms strictly to authoritative Cube v1.1 schema (`record_id` RFC 4122 UUID, `schema_version`: "1.1", `organization_id`, `client_id`: null, `agent`: "receiving", flat `subject` with `shipment_id`, `images` array with cryptographic SHA-256 and byte size, 5 standardized receiving check keys with lowercase verdicts, `outcome`, `overrides`, `status`: "complete" | "pending" | "failed", and deterministic `content_hash`).
+- **Required /v1 API Surface:**
+  - `POST /v1/captures` -> initializes capture session and returns intake upload URLs.
+  - `POST /v1/captures/{id}/complete` -> finalizes visual inspection and generates v1.1 record.
+  - `GET /v1/records/{id}` -> returns full Evidence Contract v1.1 record.
+  - `GET /v1/records?since=&agent=` -> lists paginated contracts with `since` and `agent` filtering.
+- **Standalone Build Environment Note:** Local upload implementation retained for standalone build environment; cloud presigned upload infrastructure is not configured.
+- **Zero Committed Secrets:** Confirmed with git security audit.
+
+---
+
+## 11. Production Deployment Readiness
 
 - **Production Build:** Verified with `tsc && vite build` (`frontend/dist` built with 0 errors).
 - **Docker / Production Server:**
@@ -495,4 +508,4 @@ In accordance with Engineering Rule 1:
   uvicorn backend.app:app --host 0.0.0.0 --port 8000 --workers 4
   ```
 - **Environment Template:** See [`.env.example`](.env.example) for all configurable parameters.
-- **Zero Committed Secrets:** Confirmed with git audit.
+

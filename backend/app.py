@@ -14,6 +14,8 @@ from contextlib import asynccontextmanager
 import os
 import shutil
 import json
+import uuid
+from datetime import datetime
 
 from backend.db import (
     init_db, get_records_by_org, get_record_by_id_scoped,
@@ -22,7 +24,7 @@ from backend.db import (
 )
 from backend.agent import ReceivingManagerAgent
 from backend.eval_runner import run_evaluation_suite
-from backend.contract import generate_evidence_contract, RECEIVING_EVIDENCE_SCHEMA_V1
+from backend.contract import generate_evidence_contract, RECEIVING_EVIDENCE_SCHEMA_V1, to_contract_uuid
 from backend.rules_engine import AUTHORITATIVE_RULES_DATABASE
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -81,6 +83,24 @@ class OverrideRequest(BaseModel):
 class ReinspectRequest(BaseModel):
     photo_refs: List[str] = []
     notes: Optional[str] = None
+
+class CaptureCreateRequest(BaseModel):
+    unit_id: Optional[str] = "UNIT-V1-AUTO"
+    shipment_id: Optional[str] = None
+    po_number: Optional[str] = "PO-V1-STANDARD"
+    po_line: int = 1
+    supplier: Optional[str] = "Supplier Standard"
+    sku: Optional[str] = "SKU-V1-DEFAULT"
+    product_title: Optional[str] = "Inbound Goods Standard Unit"
+    expected_images_count: int = 2
+
+class CaptureCompleteRequest(BaseModel):
+    photo_refs: Optional[List[str]] = None
+    simulate_fail_open: bool = False
+    notes: Optional[str] = None
+
+# In-memory store for active intake capture sessions
+ACTIVE_CAPTURE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 # 1. Health Check
 @app.get("/api/health")
@@ -676,4 +696,271 @@ def get_purchase_orders(
         "count": len(db_pos),
         "purchase_orders": db_pos
     }
+
+# ==============================================================================
+# AUTHORITATIVE EVIDENCE CONTRACT v1.1 API SURFACE
+# ==============================================================================
+
+# 15. Create Intake Capture Session (Evidence Contract v1.1)
+@app.post("/v1/captures")
+def create_v1_capture(
+    req: Optional[CaptureCreateRequest] = Body(default_factory=CaptureCreateRequest),
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    """
+    Contract Requirement:
+    POST /v1/captures -> { capture_id, upload_urls[] }
+    Creates capture session scoped to caller's organization.
+    Note: Local standalone disk upload implementation retained for build environment;
+    cloud presigned upload infrastructure is not configured.
+    """
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+    capture_id = str(uuid.uuid4())
+    img_count = max(1, min(req.expected_images_count if req else 2, 10))
+
+    upload_urls = [
+        f"/api/upload-photo?capture_id={capture_id}&org_id={tenant_org}&shot={i+1}"
+        for i in range(img_count)
+    ]
+
+    intake_spec = req.model_dump() if req and hasattr(req, "model_dump") else (req.dict() if req else {})
+    ACTIVE_CAPTURE_SESSIONS[capture_id] = {
+        "capture_id": capture_id,
+        "org_id": tenant_org,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "intake_spec": intake_spec,
+        "uploaded_photos": []
+    }
+
+    return {
+        "capture_id": capture_id,
+        "upload_urls": upload_urls,
+        "storage_provider": "local_standalone_disk",
+        "documentation": "Local upload implementation retained for standalone build environment; cloud presigned upload infrastructure is not configured."
+    }
+
+# 16. Complete Capture Session & Generate Evidence Record (Evidence Contract v1.1)
+@app.post("/v1/captures/{capture_id}/complete")
+def complete_v1_capture(
+    capture_id: str,
+    req: Optional[CaptureCompleteRequest] = Body(default_factory=CaptureCompleteRequest),
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    """
+    Contract Requirement:
+    POST /v1/captures/{id}/complete -> { record_id, status }
+    Finalizes inspection, creates/persists the evidence record, and returns UUID + status.
+    """
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+    session = ACTIVE_CAPTURE_SESSIONS.get(capture_id, {})
+
+    if session and session.get("org_id") != tenant_org:
+        raise HTTPException(status_code=403, detail="Access denied: Capture session belongs to another tenant.")
+
+    intake_spec = session.get("intake_spec", {})
+    unit_id = intake_spec.get("unit_id") or f"UNIT-{capture_id[:8]}"
+    shipment_id = intake_spec.get("shipment_id")
+    po_number = intake_spec.get("po_number", "PO-7000")
+    po_line = intake_spec.get("po_line", 1)
+    sku = intake_spec.get("sku", "BLUE-BOTTLE-001")
+    supplier = intake_spec.get("supplier", "Supplier Standard")
+    product_title = intake_spec.get("product_title", "Standard Inbound Item")
+
+    submitted_photos = (req.photo_refs if req and req.photo_refs else None) or session.get("uploaded_photos") or ["fixtures/receiving/clean_pallet.jpg"]
+    sim_failure = req.simulate_fail_open if req else False
+
+    agent = ReceivingManagerAgent()
+    spec_data = {
+        "po_number": po_number,
+        "po_line": po_line,
+        "shipment_id": shipment_id,
+        "supplier": supplier,
+        "sku": sku,
+        "asin": intake_spec.get("asin", "B0DUMMY000"),
+        "product_title": product_title,
+        "spec_colour": intake_spec.get("spec_colour", "n/a"),
+        "spec_variant": intake_spec.get("spec_variant", "n/a"),
+        "spec_components": intake_spec.get("spec_components", "n/a"),
+        "cartons_ordered": intake_spec.get("cartons_ordered", 2),
+        "cartons_received": intake_spec.get("cartons_received", 2),
+        "units_per_carton_ordered": intake_spec.get("units_per_carton_ordered", 12),
+        "units_per_carton_counted": intake_spec.get("units_per_carton_counted", 12),
+        "qty_ordered": intake_spec.get("qty_ordered", 24),
+        "qty_received": intake_spec.get("qty_received", 24),
+    }
+
+    result = agent.run_batch_receiving_inspection(
+        org_id=tenant_org,
+        unit_id=unit_id,
+        po_line_spec=spec_data,
+        captured_images=submitted_photos,
+        simling_failure=sim_failure,
+        shipment_id=shipment_id
+    )
+
+    record_id = f"RCV-{unit_id.replace('UNIT-', '') if 'UNIT-' in unit_id else unit_id}"
+    contract_record_uuid = to_contract_uuid(record_id)
+
+    # Persist in DB
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT OR REPLACE INTO receiving_records (
+        record_id, unit_id, shipment_id, org_id, po_number, po_line, supplier, sku, asin,
+        product_title, spec_colour, spec_variant, spec_components,
+        cartons_ordered, cartons_received, units_per_carton_ordered, units_per_carton_counted,
+        qty_ordered, qty_received, identity_match, carton_damage, unit_damage,
+        quality_flags, photo_refs, operator_id, captured_at, overall_verdict,
+        agent_confidence, status, evidence_data
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        record_id, result["unit_id"], shipment_id, tenant_org, po_number, po_line,
+        supplier, sku, spec_data["asin"], product_title,
+        spec_data["spec_colour"], spec_data["spec_variant"], spec_data["spec_components"],
+        result["cartons_ordered"], result["cartons_received"],
+        result["units_per_carton_ordered"], result["units_per_carton_counted"],
+        result["qty_ordered"], result["qty_received"],
+        result["identity_match"], result["carton_damage"], result["unit_damage"],
+        result["quality_flags"], ";".join(submitted_photos), "op_v1_dock",
+        result["captured_at"], result["overall_verdict"], result["agent_confidence"],
+        result["status"], result["evidence_data"]
+    ))
+    conn.commit()
+    conn.close()
+
+    record_inspection_attempt(
+        record_id=record_id,
+        org_id=tenant_org,
+        unit_id=result["unit_id"],
+        shipment_id=shipment_id,
+        overall_verdict=result["overall_verdict"],
+        agent_confidence=result["agent_confidence"],
+        status=result["status"],
+        execution_mode=result["execution_mode"],
+        ai_provider=result.get("ai_provider"),
+        decision_rationale=result.get("decision_rationale") or (result.get("structured_evidence") or {}).get("decision_rationale", ""),
+        evidence_data=result["evidence_data"],
+        photo_refs=";".join(submitted_photos),
+        captured_at=result["captured_at"]
+    )
+
+    contract_status = "pending" if result["status"] == "pending_review" or result["overall_verdict"] == "PENDING_REVIEW" else "complete"
+
+    return {
+        "record_id": contract_record_uuid,
+        "status": contract_status
+    }
+
+# 17. Retrieve Single Evidence Contract v1.1 Record
+@app.get("/v1/records/{record_id}")
+def get_v1_record(
+    record_id: str,
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    """
+    Contract Requirement:
+    GET /v1/records/{id} -> the evidence record
+    Returns full Evidence Contract v1.1 record.
+    Accepts internal record_id or deterministic contract UUID.
+    Strictly scoped to caller's organization.
+    """
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+
+    # 1. Direct scoped lookup by internal record_id
+    record = get_record_by_id_scoped(record_id, tenant_org)
+
+    # 2. If not found by direct ID, check if queried by contract UUID
+    if not record:
+        all_records = get_records_by_org(tenant_org)
+        for r in all_records:
+            if to_contract_uuid(r["record_id"]) == record_id:
+                record = r
+                break
+
+    if not record:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Record '{record_id}' not found for organization '{tenant_org}'. Tenancy isolation enforced."
+        )
+
+    # Fetch overrides if any
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM operator_overrides WHERE record_id = ? AND org_id = ? ORDER BY overridden_at ASC", (record["record_id"], tenant_org))
+    overrides = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    return generate_evidence_contract(record, overrides)
+
+# 18. List Evidence Contract v1.1 Records
+@app.get("/v1/records")
+def list_v1_records(
+    since: Optional[str] = Query(None, description="ISO 8601 UTC timestamp filter: records with captured_at >= since"),
+    agent: Optional[str] = Query(None, description="Filter by agent type: 'receiving'"),
+    limit: int = Query(50, ge=1, le=100),
+    cursor: Optional[str] = Query(None),
+    x_org_id: Optional[str] = Header(None, alias="X-Org-ID"),
+    org_id: Optional[str] = Query(None)
+):
+    """
+    Contract Requirement:
+    GET /v1/records?since=&agent= -> { records[], next_cursor }
+    Returns paginated array of Evidence Contract v1.1 records scoped to tenant.
+    """
+    tenant_org = x_org_id or org_id or "org_demo_alpha"
+
+    # Agent filter: if specified and not 'receiving', return empty list
+    if agent and agent.strip().lower() != "receiving":
+        return {
+            "records": [],
+            "next_cursor": None
+        }
+
+    records = get_records_by_org(tenant_org)
+
+    # Filter by 'since' timestamp if provided
+    if since:
+        since_clean = since.rstrip("Z")
+        records = [
+            r for r in records
+            if (r.get("captured_at") or "").rstrip("Z") >= since_clean
+        ]
+
+    # Fetch all overrides for this tenant
+    conn = get_db_connection()
+    cursor_db = conn.cursor()
+    cursor_db.execute("SELECT * FROM operator_overrides WHERE org_id = ? ORDER BY overridden_at ASC", (tenant_org,))
+    all_overrides = [dict(r) for r in cursor_db.fetchall()]
+    conn.close()
+
+    overrides_by_rec = {}
+    for ov in all_overrides:
+        rec_k = ov["record_id"]
+        overrides_by_rec.setdefault(rec_k, []).append(ov)
+
+    # Generate v1.1 evidence contracts
+    v1_contracts = [
+        generate_evidence_contract(r, overrides_by_rec.get(r["record_id"], []))
+        for r in records
+    ]
+
+    # Handle cursor pagination
+    start_idx = 0
+    if cursor:
+        for idx, c in enumerate(v1_contracts):
+            if c["record_id"] == cursor or c.get("subject", {}).get("order_id") == cursor:
+                start_idx = idx + 1
+                break
+
+    page = v1_contracts[start_idx : start_idx + limit]
+    next_cursor = page[-1]["record_id"] if (start_idx + limit < len(v1_contracts) and page) else None
+
+    return {
+        "records": page,
+        "next_cursor": next_cursor
+    }
+
 
