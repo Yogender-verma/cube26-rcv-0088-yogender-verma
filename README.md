@@ -189,7 +189,7 @@ For individual checks:
 **Tagline:** "Verify what actually arrived."  
 **Participant:** Yogender Verma  
 **Fork Repository:** `https://github.com/Yogender-verma/cube26-rcv-0088-yogender-verma`  
-**Status:** COMPLETE, TESTED (39/39 passing), EVALUATED (50 units), VERIFIED & PRODUCTION READY.
+**Status:** COMPLETE, TESTED (70/70 passing), EVALUATED (50 units), VERIFIED & PRODUCTION READY.
 
 ---
 
@@ -388,13 +388,14 @@ run_app.bat
 
 ## 5. Running Automated Tests
 
-Run the full automated test suite (58 test cases covering all scenarios, security, fail-open, attempt history, shipment_id, and cross-pod integration):
+Run the full automated test suite (70 test cases covering Evidence Contract v1.1, all scenarios, security, fail-open, attempt history, shipment_id, and cross-pod integration):
 
 ```bash
 python -m pytest tests/ -v
 ```
 
 ### Test Suite Structure:
+- `tests/test_evidence_contract_v1_1.py` — Strict 12-test suite for Cube Evidence Contract v1.1 compliance, schema enforcement, /v1 API lifecycle, and tenant isolation.
 - `tests/test_production_integration.py` — Comprehensive suite verifying all 20 integration priorities (shipment_id persistence, cross-pod check keys, immutable attempt history, live uncertainty metrics, occlusion reinspection, candidate discrimination, fail-open semantics).
 - `tests/test_scenarios_14.py` — The 14 official required track scenarios (Shipment OK, Short, Extra, Wrong SKU, Wrong Variant, Crushed Carton, Water Damage, Tears, Missing Component, Ambiguous, Model Failure, Multi-Image, Override, Tenant Isolation).
 - `tests/test_security_tenancy.py` — Multi-tenant RLS zero-leak test, cross-tenant image 403 Forbidden test, and path traversal block test.
@@ -440,7 +441,7 @@ Full report and methodology are documented in [`EVAL_REPORT.md`](EVAL_REPORT.md)
 
 ## 7. Application Navigation & Demo Scenarios
 
-Open `http://localhost:5173` in your browser. The application features a production warehouse layout:
+Open `http://localhost:3000` in your browser. The application features a production warehouse layout:
 
 ### Main Navigation:
 - **Receiving (Default)**: Production dock receiving screen. Select any PO, review auto-populated expected specifications, attach receiving photos, click **RUN AI INSPECTION**, and review the hero status (PASS/FAIL/UNCERTAIN), visual bounding boxes, and Expected vs Observed comparison.
