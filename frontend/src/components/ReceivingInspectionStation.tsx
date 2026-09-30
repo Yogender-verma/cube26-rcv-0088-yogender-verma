@@ -17,6 +17,8 @@ interface Props {
   preselectedPoNumber?: string | null;
 }
 
+const BACKEND_BASE = import.meta.env.VITE_API_BASE_URL || '';
+
 export function getImageUrl(photoRef: string, orgId: string): string {
   if (!photoRef) return '';
   if (photoRef.startsWith('http://') || photoRef.startsWith('https://') || photoRef.startsWith('blob:')) {
@@ -24,18 +26,18 @@ export function getImageUrl(photoRef: string, orgId: string): string {
   }
   const clean = photoRef.replace(/\\/g, '/');
   if (clean.includes('/images/')) {
-    return `http://localhost:8000${clean.startsWith('/') ? '' : '/'}${clean}?org_id=${orgId}`;
+    return `${BACKEND_BASE}${clean.startsWith('/') ? '' : '/'}${clean}?org_id=${orgId}`;
   }
   if (clean.startsWith('fixtures/org_') || clean.startsWith('org_')) {
     const parts = clean.split('/');
     const fileOrg = parts[parts.length - 2] || orgId;
     const filename = parts[parts.length - 1];
-    return `http://localhost:8000/api/images/${fileOrg}/${filename}?org_id=${orgId}`;
+    return `${BACKEND_BASE}/api/images/${fileOrg}/${filename}?org_id=${orgId}`;
   }
   if (clean.startsWith('fixtures/')) {
-    return `http://localhost:8000/api/${clean}`;
+    return `${BACKEND_BASE}/api/${clean}`;
   }
-  return `http://localhost:8000/api/fixtures/receiving/${clean}`;
+  return `${BACKEND_BASE}/api/fixtures/receiving/${clean}`;
 }
 
 export const ReceivingInspectionStation: React.FC<Props> = ({

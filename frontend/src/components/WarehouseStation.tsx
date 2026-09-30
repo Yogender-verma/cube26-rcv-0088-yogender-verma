@@ -550,7 +550,7 @@ export const WarehouseStation: React.FC<Props> = ({ orgId, onRecordCreated }) =>
           }}>
             {photoRefs[0] && (
               <img
-                src={`http://localhost:8000/api/${photoRefs[0].replace('fixtures/', 'fixtures/')}`}
+                src={`${(import.meta.env.VITE_API_BASE_URL || '')}/api/${photoRefs[0].replace('fixtures/', 'fixtures/')}`}
                 alt="Receiving evidence"
                 style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                 onError={(e: any) => {

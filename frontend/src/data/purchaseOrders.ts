@@ -448,7 +448,7 @@ export const PURCHASE_ORDERS_CATALOG: PurchaseOrderItem[] = [
  */
 export async function getPurchaseOrders(orgId: string): Promise<PurchaseOrderItem[]> {
   try {
-    const res = await fetch(`http://localhost:8000/api/purchase-orders`, {
+    const res = await fetch(`${(import.meta.env.VITE_API_BASE_URL || '')}/api/purchase-orders`, {
       headers: { 'X-Org-ID': orgId }
     });
     if (res.ok) {
