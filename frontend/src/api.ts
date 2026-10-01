@@ -67,8 +67,8 @@ export interface HealthStatus {
   track: string;
   tagline: string;
 }
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || '') + '/api';
+const RAW_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+const API_BASE = RAW_BASE ? `${RAW_BASE}/api` : '/api';
 
 export async function fetchHealth(): Promise<HealthStatus> {
   const res = await fetch(`${API_BASE}/health`);

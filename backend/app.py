@@ -103,6 +103,8 @@ class CaptureCompleteRequest(BaseModel):
 ACTIVE_CAPTURE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 # 1. Health Check
+@app.get("/")
+@app.get("/health")
 @app.get("/api/health")
 def health():
     agent = ReceivingManagerAgent()

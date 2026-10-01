@@ -16,8 +16,7 @@ interface Props {
   onViewContract?: (record: any) => void;
   preselectedPoNumber?: string | null;
 }
-
-const BACKEND_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const BACKEND_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 
 export function getImageUrl(photoRef: string, orgId: string): string {
   if (!photoRef) return '';

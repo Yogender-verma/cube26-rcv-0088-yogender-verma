@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: cube26-rcv-backend
+    runtime: python
+    region: oregon
+    plan: free
+    branch: deploy/rcv1-live
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.4
+      - key: VISION_MODEL_NAME
+        value: gemini-2.5-flash
